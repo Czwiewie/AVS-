@@ -56,3 +56,9 @@ export async function optionalLooks(bridge, source, timeout = 1200) {
         return await Promise.race([read(), new Promise(resolve => { timer = setTimeout(() => resolve([]), timeout); })]);
     } catch { return []; } finally { clearTimeout(timer); }
 }
+
+export function priorContext(ctx, index, count) {
+    if (!count) return [];
+    return ctx.chat.slice(0, index).map(m => prose(m)).filter(Boolean).slice(-count)
+        .map(text => text.slice(-1800));
+}
