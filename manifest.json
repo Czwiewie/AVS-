@@ -1,0 +1,12 @@
+{
+  "display_name": "AVS 视觉工坊 · 独立版",
+  "loading_order": 40,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "studio-entry.js",
+  "author": "AVS Project",
+  "version": "1.0.2",
+  "minimum_client_version": "1.19.0",
+  "css": "src/style.css"
+}
