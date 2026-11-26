@@ -7,7 +7,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.4';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.5';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -464,7 +464,7 @@ export function installStudio(host, owner, kind, css) {
         try {
             source = selectedSource();
             field('excerpt').textContent = manual ? '可直接填写场景、负面词和人物分栏。' :
-                '#' + source.index + ' · ' + source.text.replace(/\s+/g, ' ').slice(0,160);
+                '#' + source.index + ' · ' + source.visualText.replace(/\s+/g, ' ').slice(0,160);
         } catch(error) {
             field('excerpt').textContent = error.message;
             return;
@@ -505,7 +505,8 @@ export function installStudio(host, owner, kind, css) {
         field('roles').replaceChildren();
         for (const role of plan.characters) addRole(role);
         field('applyStyle').checked = applyStyle;
-        field('draftSource').textContent = source ? '草稿来源 · ' + floorLabel(source.index) : '可直接填写，或从所选 AI 楼层提取再编辑。';
+        field('draftSource').textContent = source ? '草稿来源 · ' + floorLabel(source.index)
+            + (plan.sourceQuote ? ' · ' + plan.sourceQuote.slice(0,100) : '') : '可直接填写，或从所选 AI 楼层提取再编辑。';
     }
     function getDraft() {
         const characters = Array.from(field('roles').children, card => ({
@@ -723,6 +724,9 @@ export function installStudio(host, owner, kind, css) {
             }
         } catch(error) {
             if (completed && !signal.aborted) throw Error(error.message + ' 已完成 ' + completed + ' 张。');
+            if (!useDraft && !signal.aborted && matches(source)) {
+                throw Error(error.message + ' 提示词已保留，可在「提示词」页用现有草稿重试。');
+            }
             throw error;
         }
         notify('已生成 ' + completed + ' 张插画。' + (storedCount < completed ? '部分图片仅保留在本页，请下载原图。' : ''));

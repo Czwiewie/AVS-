@@ -1,4 +1,4 @@
-export function prose(message) {
+function legacyFloorText(message) {
     if (!message || message.is_user || message.is_system || message.extra?.isSmallSys) return '';
     return String(message.mes ?? '').replace(/<(think|thinking|reasoning)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
         .replace(/<(think|thinking|reasoning)\b[^>]*>[\s\S]*$/gi, '').replace(/<details\b[^>]*>([\s\S]*?)<\/details>/gi, (_, content) => {
@@ -7,16 +7,28 @@ export function prose(message) {
         }).trim();
 }
 
+
+export function prose(message) {
+    return legacyFloorText(message)
+        .replace(/<!--[\s\S]*?(?:-->|$)/g,'')
+        .replace(/<(script|style|template)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi,'')
+        .replace(/<(wave_plan|planning|plan|analysis|summary|choices|options|status_bar)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'')
+        .replace(/<(?:wave_plan|planning|plan|analysis|summary|choices|options|status_bar)\b[^>]*>[\s\S]*$/gi,'')
+        .replace(/<(?:now_plot|gametxt|story|narrative)\b[^>]*>|<\/(?:now_plot|gametxt|story|narrative)\s*>/gi,'')
+        .trim();
+}
+
 export function sourceAt(ctx, selected = 'latest') {
     const chat = ctx?.chat ?? [];
     const index = selected === 'latest' ? chat.findLastIndex(m => prose(m)) : Number(selected);
     const m = chat[index];
-    const text = prose(m);
-    if (!Number.isInteger(index) || !text) throw Error('请选择一条已有正文的 AI 回复。');
+    const visualText = prose(m);
+    const text = legacyFloorText(m);
+    if (!Number.isInteger(index) || !visualText) throw Error('请选择一条已有正文的 AI 回复。');
     const chatId = ctx.chatId || ctx.getCurrentChatId?.();
     if (!chatId) throw Error('请先打开一个已保存的角色聊天。');
     const key = JSON.stringify([ctx.groupId ?? null, ctx.characterId ?? null, chatId, index, m.swipe_id ?? 0]);
-    return {key, index, text, speaker: m.name || '', latest: index === chat.findLastIndex(m => prose(m))};
+    return {key, index, text, visualText, speaker: m.name || '', latest: index === chat.findLastIndex(m => prose(m))};
 }
 
 function appearance(groups) {
@@ -37,7 +49,7 @@ export async function optionalLooks(bridge, source, timeout = 1200) {
     const read = async () => {
         const summary = await bridge.fullInspector();
         const people = (summary.characters ?? []).filter(p => !p.blocked && p.name &&
-            (source.text.includes(p.name) || source.speaker === p.name));
+            ((source.visualText ?? source.text).includes(p.name) || source.speaker === p.name));
         if (!people.length || summary.runtime?.rebuild_required || summary.runtime?.requires_sync) return [];
         const floor = summary.runtime?.last_processed_message_id;
         const current = source.latest && floor != null && Number(floor) === source.index;
