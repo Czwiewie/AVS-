@@ -1,6 +1,6 @@
-# AVS 视觉工坊 1.2.5
+# AVS 视觉工坊 1.2.6
 
-面向 SillyTavern 1.19.0 的聊天插画扩展，支持 NovelAI Diffusion 4.5 Full 和 5 Full。
+面向 SillyTavern 1.19.0 的聊天插画扩展，支持 NovelAI Diffusion 4.5 Full、5 Full、OpenAI 兼容生图、原生 xAI Grok Imagine 与 Google Gemini Nano Banana。
 
 ## 安装
 
@@ -10,9 +10,24 @@
 
 ## 第一次生成
 
-1. 打开「连接」，官方地址为 `https://image.novelai.net`，填写 NovelAI 账户的 Persistent API Token 即可鉴权。其它生图 API 可选择兼容 NovelAI 的 `/ai/generate-image` 或 OpenAI 的 `/images/generations`，填服务商提供的地址、密钥和模型。楼层规划或参考图分析需要支持图片输入的 OpenAI Chat Completions 兼容接口。
-2. 打开「画风」，上传参考图，或填写自定义美术特征和画师串。上传后会保存线条、色彩、光影、渲染和构图的文字描述。可切换多个预设，也可选不叠加画风。
-3. 「绘图」页顶部并排显示 NAI 4.5 Full 和 NAI 5 Full。点选模型后，再选楼层和画幅，点「生成插画」。想手动控制则到「提示词」，先提取草稿再改词，或使用「手写提示词」直接出图。
+1. 在「连接」配置生图 API。NovelAI 官方地址为 `https://image.novelai.net`，使用账户的 Persistent API Token。「其它生图 API」提供原生 Grok、原生 Nano Banana、NovelAI 兼容和 OpenAI 兼容选四项。按协议填写服务地址与凭证。自动楼层成图需要配置 OpenAI Chat Completions 兼容的提示词 API，参考图分析还要求该模型支持图片输入。
+2. 在「画风」可选上传参考图，或填写与二维立绘相容的美术描述和画师串。分析结果以文字保存，涵盖线条、色彩、光影、画法和构图。「不叠加画风」时仍会应用二维立绘基础要求。
+3. 在「绘图」选楼层，点击「生成插画」。NovelAI 模型可在此页切换 4.5 Full 与 5 Full，Grok、Nano Banana 和 GPT Image 的模型与画幅在「连接」设置。「提示词」可编辑自动草稿，也可直接使用手写提示词出图。
+
+## 原生 Grok 和 Nano Banana
+
+在「连接 → 其它生图 API」选择对应协议并填写该服务的 API Key。
+
+| 路线 | 默认 API 地址 | 支持的生图模型 |
+| --- | --- | --- |
+| xAI 原生 · Grok Imagine | `https://api.x.ai/v1` | Grok Imagine Image 2.0、Grok Imagine Image |
+| Google 原生 · Gemini Nano Banana | `https://generativelanguage.googleapis.com/v1beta` | Nano Banana 2.1、2、2 Lite、Pro、初代 Nano Banana |
+
+xAI 用 Images API 的画幅比例和分辨率；2.0 可单独调画质。Google 用 Interactions API，明确请求图像并读取最终输出，按型号提供画幅和分辨率。这两条线路独立保存配置，服务商仍需允许当前浏览器跨域访问。OpenAI 兼容中转仍用「OpenAI 兼容图片生成」。[xAI 官方生图文档](https://docs.x.ai/developers/model-capabilities/images/generation) · [Gemini 官方生图文档](https://aistudio.google.com/docs/image-generation)
+
+## 二维立绘画风
+
+所有路线的实际出图提示词固定采用碧蓝航线式二维立绘方向，明确线条、分层阴影、绘制材质与单一视觉焦点。NAI 使用标签与人物分栏，GPT Image、Grok 和 Nano Banana 采用自然语言画面指令。适配时过滤常见强写实或 3D 画法标签，保留兼容的参考画风与角色、动作和构图要求。历史里可查看实际发送的提示词。
 
 第三方使用完整的 NovelAI 模型 ID 时，绘图页自动选中对应按钮，切换按钮也会同步修改连接的模型名。服务商使用别名时，NovelAI 兼容协议下的两按钮用于指定对应参数格式，模型名按服务商提供的别名发送。其它通用 OpenAI 图片模型在连接页选择。
 
@@ -24,7 +39,7 @@
 
 - 提示词请求从楼层正文提取一个画面。会剔除常见规划、分析、状态栏和选项块；在模型输出带解释、代码围栏或兼容 SSE 时识别符合字段契约的完整画面对象。若图像 API 失败，可在「提示词」页使用保留的草稿重试。
 - NovelAI 回图支持 ZIP、独立图像及带最终帧的 MessagePack；图像服务返回 HTML、输出截断、缺最终帧或 Anlas 不足时会直接报告该阶段原因。
-- 源码对照与验证范围见 [三仓链路核查](docs/workflow-audit.md)。
+- 1.2.5 的源码对照与验证范围见 [三仓链路核查](docs/workflow-audit.md)。
 
 - **绘图**支持常用画幅、自定义尺寸、采样器、步数、引导强度、CFG Rescale、质量标签、随机或固定种子及 1～4 张出图。多张串行发送，固定种子按张递增。等待服务商时进度条显示已返回张数。
 - **绘图预设**可选剧情竖幅、宽幅场景、快速构图，也能将当前模型和画布、采样、种子等参数另存为自定义预设。预设不保存密钥或画风。
