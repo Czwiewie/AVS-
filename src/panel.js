@@ -1,4 +1,5 @@
 import {MODEL_NAMES} from './api.js';
+import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 
 export const STUDIO_PAGES = {
     draw:'绘图', prompts:'提示词', styles:'画风', gallery:'历史', settings:'连接'
@@ -6,6 +7,25 @@ export const STUDIO_PAGES = {
 
 export const CANVASES = {'832x1216':'竖幅', '1216x832':'横幅', '1024x1024':'方形',
     '768x1344':'高竖幅', '1344x768':'宽横幅', '896x1152':'短竖幅', '1152x896':'短横幅'};
+
+function nativeImageConnection(protocol) {
+    const provider = NATIVE_IMAGE_PROVIDERS[protocol];
+    const models = Object.entries(provider.models);
+    const options = values => [...new Set(values)].map(value =>
+        `<option value="${value}">${value === 'auto' ? '自动' : value}</option>`).join('');
+    const capabilities = models.map(([id]) => nativeImageOptions(protocol,id));
+    return `<div class="studio-stack" data-field="${protocol}Connection" hidden>
+        <label>API 地址<input data-field="${protocol}Base" type="url" data-lock></label>
+        <label>${protocol === 'grok' ? 'xAI' : 'Gemini'} API Key<input data-field="${protocol}Key" type="password" autocomplete="off" data-lock></label>
+        <label>生图模型<select data-field="${protocol}Model" data-lock>${models.map(([id,label]) =>
+            `<option value="${id}">${label}</option>`).join('')}</select></label>
+        <div class="studio-grid">
+            <label>画幅比例<select data-field="${protocol}Aspect" data-lock>${options(capabilities.flatMap(c => c.aspects))}</select></label>
+            <label>分辨率<select data-field="${protocol}Resolution" data-lock>${options(capabilities.flatMap(c => c.resolutions))}</select></label>
+            ${protocol === 'grok' ? '<label data-field="grokQualityRow">画质<select data-field="grokQuality" data-lock><option value="auto">随模型</option><option value="low">低</option><option value="medium">中</option></select></label>' : ''}
+        </div>
+    </div>`;
+}
 
 export function workshopPanel(samplers) {
     const tabButtons = Object.entries(STUDIO_PAGES).map(([key, label]) =>
@@ -25,6 +45,7 @@ export function workshopPanel(samplers) {
           <div class="studio-model-buttons">${modelButtons}</div>
           <input type="hidden" data-field="naiModel">
         </fieldset>
+        <p class="studio-note">出图画风 · 碧蓝航线式二维立绘</p>
         <h3>画面来源</h3>
         <div class="studio-grid">
           <label>绘图方式<select data-field="mode" data-lock><option value="scene">AI 楼层配图</option><option value="manual">手写提示词</option></select></label>
@@ -86,7 +107,7 @@ export function workshopPanel(samplers) {
         </div>
         <label>正面提示词<textarea data-field="positive" rows="4" data-lock placeholder="场景、人数、动作、镜头和光影"></textarea></label>
         <label>负面提示词<textarea data-field="negative" rows="2" data-lock></textarea></label>
-        <label class="studio-check"><input type="checkbox" data-field="applyStyle" data-lock>叠加已选画风</label>
+        <label class="studio-check"><input type="checkbox" data-field="applyStyle" data-lock>叠加已选参考画风</label>
         <div class="studio-row"><h3>独立人物提示词</h3><button type="button" data-field="addRole" data-lock>添加人物</button></div>
         <div class="studio-stack" data-field="roles"></div>
         <button class="studio-secondary" type="button" data-field="drawDraft" data-lock>按这份提示词生成</button>
@@ -171,17 +192,23 @@ export function workshopPanel(samplers) {
             <label>兼容协议<select data-field="otherProtocol" data-lock>
               <option value="openai">OpenAI 兼容图片生成</option>
               <option value="nai">NovelAI 兼容图片生成</option>
+              <option value="grok">${NATIVE_IMAGE_PROVIDERS.grok.label}</option>
+              <option value="gemini">${NATIVE_IMAGE_PROVIDERS.gemini.label}</option>
             </select></label>
-            <label>API 地址<input data-field="otherBase" type="url" data-lock></label>
-            <label>API 密钥<input data-field="otherKey" type="password" autocomplete="off" data-lock></label>
-            <div class="studio-row"><label class="studio-grow">生图模型名<input data-field="otherModel" autocomplete="off" data-lock></label>
-              <button type="button" data-field="otherModels" data-lock>获取模型</button></div>
-            <label data-field="otherSizeRow">画幅<select data-field="otherSize" data-lock>
-              <option value="auto">由服务商决定</option>
-              <option value="1024x1024">方形 · 1024 × 1024</option>
-              <option value="1024x1536">竖幅 · 1024 × 1536</option>
-              <option value="1536x1024">横幅 · 1536 × 1024</option>
-            </select></label>
+            <div class="studio-stack" data-field="compatibleConnection">
+              <label>API 地址<input data-field="otherBase" type="url" data-lock></label>
+              <label>API 密钥<input data-field="otherKey" type="password" autocomplete="off" data-lock></label>
+              <div class="studio-row"><label class="studio-grow">生图模型名<input data-field="otherModel" autocomplete="off" data-lock></label>
+                <button type="button" data-field="otherModels" data-lock>获取模型</button></div>
+              <label data-field="otherSizeRow">画幅<select data-field="otherSize" data-lock>
+                <option value="auto">由服务商决定</option>
+                <option value="1024x1024">方形 · 1024 × 1024</option>
+                <option value="1024x1536">竖幅 · 1024 × 1536</option>
+                <option value="1536x1024">横幅 · 1536 × 1024</option>
+              </select></label>
+            </div>
+            ${nativeImageConnection('grok')}
+            ${nativeImageConnection('gemini')}
           </div>
           <label class="studio-check"><input data-field="remember" type="checkbox" data-lock>在此浏览器记住密钥</label>
         </div>

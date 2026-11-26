@@ -1,5 +1,6 @@
 import {sourceAt, prose, optionalLooks, priorContext} from './scene.js';
-import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, endpoint, extractStyle, planScene, generate, drawOptions, finishPrompt, makeImageBody, availableModels} from './api.js';
+import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageBody, availableModels} from './api.js';
+import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 import {pictureLibrary} from './library.js';
 import {createAcademyFeedback} from './theme.js';
 import {chatPresetManager, presetNames, visionPreset} from './presets.js';
@@ -7,7 +8,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.5';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.6';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -40,7 +41,11 @@ export function installStudio(host, owner, kind, css) {
     });
     const id = 'avs-illustration-studio';
     const defaults = {visionBase:'https://api.openai.com/v1', visionModel:'', naiBase:OFFICIAL_NAI,
-        naiModel:MODELS[0], imageProvider:'official', otherProtocol:'openai', otherBase:'', otherModel:'', otherSize:'auto'};
+        naiModel:MODELS[0], imageProvider:'official', otherProtocol:'openai', otherBase:'', otherModel:'', otherSize:'auto',
+        grokBase:NATIVE_IMAGE_PROVIDERS.grok.base, grokModel:'grok-imagine-image-2.0', grokAspect:'2:3', grokResolution:'1K', grokQuality:'auto',
+        geminiBase:NATIVE_IMAGE_PROVIDERS.gemini.base, geminiModel:'gemini-nano-banana-2.1', geminiAspect:'2:3', geminiResolution:'1K'};
+    const nativeProtocols = Object.keys(NATIVE_IMAGE_PROVIDERS);
+    const keyKinds = ['vision','nai','other',...nativeProtocols];
     const styleNames = {line:'线条', color:'色彩', light:'光影', rendering:'渲染', composition:'构图'};
     const builtInPresets = [
         {id:'portrait', name:'剧情竖幅', draw:{width:832,height:1216}},
@@ -127,10 +132,10 @@ export function installStudio(host, owner, kind, css) {
         save();
     }
     function currentProtocol() {
-        return text('imageProvider') === 'official' ? 'nai' : text('otherProtocol');
+        return text('imageProvider') === 'official' ? 'nai' : text('otherProtocol') || 'openai';
     }
     function thirdPartyNaiModel() {
-        if (text('imageProvider') === 'other') return knownNaiModel(text('otherModel'));
+        if (text('imageProvider') === 'other' && !nativeProtocols.includes(currentProtocol())) return knownNaiModel(text('otherModel'));
     }
     function selectedNaiModel() {
         return thirdPartyNaiModel() ?? text('naiModel');
@@ -151,24 +156,38 @@ export function installStudio(host, owner, kind, css) {
     }
     function syncImageFields() {
         const other = text('imageProvider') === 'other';
-        const generic = other && currentProtocol() === 'openai';
+        const protocol = currentProtocol(), native = nativeProtocols.includes(protocol);
+        const generic = other && protocol === 'openai';
+        const nai = protocol === 'nai';
         const explicitModel = thirdPartyNaiModel();
         field('officialConnection').hidden = other;
         field('otherConnection').hidden = !other;
+        field('compatibleConnection').hidden = native;
+        for (const kind of nativeProtocols) field(kind + 'Connection').hidden = protocol !== kind;
+        if (native) {
+            const allowed = nativeImageOptions(protocol,text(protocol + 'Model'));
+            for (const [suffix, values] of [['Aspect',allowed.aspects],['Resolution',allowed.resolutions]]) {
+                const name = protocol + suffix, select = field(name), current = text(name);
+                select.replaceChildren(...values.map(value => new Option(value === 'auto' ? '自动' : value,value)));
+                select.value = values.includes(current) ? current : defaults[name];
+            }
+            field('grokQualityRow').hidden = protocol !== 'grok' || !allowed.qualities.length;
+        }
         field('otherSizeRow').hidden = !generic;
-        field('naiModelRow').hidden = generic && !explicitModel;
+        field('naiModelRow').hidden = !nai && !explicitModel;
         field('naiModelLabel').textContent = other && !explicitModel ? 'NovelAI 参数格式' : '生图模型';
         const selected = selectedNaiModel();
         for (const button of dialog.querySelectorAll('[data-nai-model]')) {
             button.setAttribute('aria-pressed', String(button.dataset.naiModel === selected));
         }
-        field('canvasRow').hidden = generic;
-        field('seedRow').hidden = generic;
-        for (const detail of dialog.querySelectorAll('[data-nai-only]')) detail.hidden = generic;
+        field('canvasRow').hidden = !nai;
+        field('seedRow').hidden = !nai;
+        for (const detail of dialog.querySelectorAll('[data-nai-only]')) detail.hidden = !nai;
         field('otherDraw').hidden = !other;
         field('otherDraw').textContent = other
-            ? '其它生图 API · ' + (text('otherModel') || '请在连接页选择模型') +
-                (generic ? ' · 画幅：' + (text('otherSize') === 'auto' ? '自动' : text('otherSize')) : '')
+            ? (native ? modelLabel(text(protocol + 'Model')) + ' · ' + text(protocol + 'Aspect') + ' · ' + text(protocol + 'Resolution')
+                : '其它生图 API · ' + (text('otherModel') || '请在连接页选择模型') +
+                    (generic ? ' · 画幅：' + (text('otherSize') === 'auto' ? '自动' : text('otherSize')) : ''))
             : '';
         drawLabels();
     }
@@ -176,13 +195,12 @@ export function installStudio(host, owner, kind, css) {
         const stored = settings();
         const connection = Object.fromEntries(Object.keys(defaults).map(key => [key, text(key)]));
         const other = connection.imageProvider === 'other';
-        connection.visionKey = text('visionKey');
-        connection.naiKey = text('naiKey');
-        connection.otherKey = text('otherKey');
+        for (const kind of keyKinds) connection[kind + 'Key'] = text(kind + 'Key');
         connection.imageProtocol = currentProtocol();
-        connection.imageBase = other ? connection.otherBase : OFFICIAL_NAI;
-        connection.imageKey = other ? connection.otherKey : connection.naiKey;
-        connection.imageModel = other ? connection.otherModel : connection.naiModel;
+        const imageKind = nativeProtocols.includes(connection.imageProtocol) ? connection.imageProtocol : other ? 'other' : 'nai';
+        connection.imageBase = connection[imageKind + 'Base'];
+        connection.imageKey = connection[imageKind + 'Key'];
+        connection.imageModel = connection[imageKind + 'Model'];
         if (vision || (persist && connection.visionBase)) endpoint(connection.visionBase,'/chat/completions');
         if (image || (persist && connection.imageBase)) endpoint(connection.imageBase,IMAGE_PATHS[connection.imageProtocol]);
         if (vision && checked('useVisionPreset')) {
@@ -190,7 +208,7 @@ export function installStudio(host, owner, kind, css) {
             connection.promptPreset = visionPreset(chatPresetManager(ctx), text('visionPresetName'), ctx);
         }
         if (persist) {
-            for (const kind of ['vision','nai','other']) {
+            for (const kind of keyKinds) {
                 const base = kind + 'Base';
                 const oldKey = keyId(kind, stored[base] || defaults[base]);
                 if (oldKey !== keyId(kind,connection[base])) {
@@ -268,7 +286,7 @@ export function installStudio(host, owner, kind, css) {
     }
     function drawLabels() {
         for (const key of ['steps','scale','rescale']) field(key + 'Out').textContent = text(key);
-        const custom = currentProtocol() !== 'openai' && field('canvas').value === 'custom';
+        const custom = currentProtocol() === 'nai' && field('canvas').value === 'custom';
         field('widthGroup').hidden = !custom;
         field('heightGroup').hidden = !custom;
     }
@@ -343,7 +361,10 @@ export function installStudio(host, owner, kind, css) {
     function floorLabel(index) { return index === null ? '手写提示词' : '第 ' + index + ' 楼'; }
     function portraitFile(row) { return 'AVS-' + (row.index ?? 'manual') + '-' + (row.seed ?? 'original') + '.' + row.blob.type.split('/')[1]; }
 
-    function modelLabel(model) { return MODEL_NAMES[knownNaiModel(model)] ?? model; }
+    function modelLabel(model) {
+        return MODEL_NAMES[knownNaiModel(model)] ?? NATIVE_IMAGE_PROVIDERS.grok.models[model] ??
+            NATIVE_IMAGE_PROVIDERS.gemini.models[model] ?? model;
+    }
     function pictureLabel(row) {
         return row.model ? [
             modelLabel(row.model), (row.resultSize?.width ?? row.draw.width) + '×' + (row.resultSize?.height ?? row.draw.height), row.seed == null ? '' : '种子 ' + row.seed, row.styleName
@@ -426,7 +447,10 @@ export function installStudio(host, owner, kind, css) {
         const box = field('metadataBox');
         box.hidden = !row?.plan;
         if (box.hidden) return;
-        const params = row.imageProtocol === 'openai' ? [['接口','OpenAI 兼容'], ['请求画幅',row.otherSize]] : [
+        const native = NATIVE_IMAGE_PROVIDERS[row.imageProtocol];
+        const params = native ? [['接口',native.label],['画幅比例',row.nativeOptions?.aspect],
+            ['分辨率',row.nativeOptions?.resolution],...(row.nativeOptions?.quality ? [['画质',row.nativeOptions.quality]] : [])]
+            : row.imageProtocol === 'openai' ? [['接口','OpenAI 兼容'], ['请求画幅',row.otherSize]] : [
             ['采样器',SAMPLERS[row.draw.sampler]], ['步数',row.draw.steps],
             ['引导强度',row.draw.scale], ['CFG Rescale',row.draw.rescale],
             ['自动质量标签',row.draw.quality ? '开启' : '关闭']
@@ -486,7 +510,7 @@ export function installStudio(host, owner, kind, css) {
     }
 
     function addRole(role = {}) {
-        const count = field('roles').children.length, limit = currentProtocol() !== 'openai' && selectedNaiModel() === MODELS[0] ? 6 : 22;
+        const count = field('roles').children.length, limit = currentProtocol() === 'nai' && selectedNaiModel() === MODELS[0] ? 6 : 22;
         if (count >= limit) throw Error('当前模型最多支持 ' + limit + ' 个独立人物提示词。');
         const card = document.createElement('fieldset');
         card.className = 'studio-role studio-stack';
@@ -518,10 +542,8 @@ export function installStudio(host, owner, kind, css) {
     }
     async function copyPrompt() {
         const draft = getDraft(), style = checked('applyStyle') ? activeStyle() : null;
-        const value = JSON.stringify({
-            ...draft, base:finishPrompt(draft,style),
-            negative:[draft.negative,style?.negative].filter(Boolean).join(', ')
-        }, null, 2);
+        const protocol = currentProtocol(), compiled = compileImagePrompt(protocol,draft,style);
+        const value = protocol === 'nai' ? JSON.stringify(compiled,null,2) : compiled.base;
         if (host.navigator.clipboard?.writeText) await host.navigator.clipboard.writeText(value);
         else {
             const box = document.createElement('textarea');
@@ -529,7 +551,7 @@ export function installStudio(host, owner, kind, css) {
             try { if (!document.execCommand('copy')) throw Error('浏览器未授予复制权限。'); }
             finally { box.remove(); }
         }
-        setStatus('已复制正负面词和人物分栏。');
+        setStatus('已复制实际生图提示词。');
     }
     function loadHistory() {
         if (!detail?.plan) return;
@@ -537,9 +559,18 @@ export function installStudio(host, owner, kind, css) {
         const {model, plan, draw, seed} = detail;
         field('imageProvider').value = detail.imageProvider || 'official';
         if (detail.imageProvider === 'other') {
-            field('otherModel').value = model;
-            field('otherProtocol').value = detail.imageProtocol;
-            field('otherSize').value = detail.otherSize || 'auto';
+            const protocol = detail.imageProtocol || 'openai';
+            field('otherProtocol').value = protocol;
+            if (nativeProtocols.includes(protocol)) {
+                field(protocol + 'Model').value = model;
+                syncImageFields();
+                field(protocol + 'Aspect').value = detail.nativeOptions?.aspect ?? defaults[protocol + 'Aspect'];
+                field(protocol + 'Resolution').value = detail.nativeOptions?.resolution ?? defaults[protocol + 'Resolution'];
+                if (protocol === 'grok') field('grokQuality').value = detail.nativeOptions?.quality ?? 'auto';
+            } else {
+                field('otherModel').value = model;
+                field('otherSize').value = detail.otherSize || 'auto';
+            }
         }
         field('naiModel').value = knownNaiModel(detail.naiModel) ?? knownNaiModel(model) ?? MODELS[0];
         setDraw({...draw, seed, count:1}); saveDraw();
@@ -675,6 +706,8 @@ export function installStudio(host, owner, kind, css) {
         const connection = readConnections({vision:!useDraft, image:true});
         const draw = readDraw();
         if (connection.imageProvider === 'official' && !connection.imageKey) throw Error('请在「连接」中填写 NovelAI Token。');
+        const provider = NATIVE_IMAGE_PROVIDERS[connection.imageProtocol];
+        if (provider && !connection.imageKey) throw Error('请在「连接」中填写 ' + provider.label + ' 的 API Key。');
         if (!connection.imageModel) throw Error('请在「连接」选择或填写生图模型。');
         if (edited && source.index !== null && draftAnchor && !isSelected(draftAnchor)) {
             throw Error('草稿来自另一条回复。请选择原楼层，或从当前楼层重新提取草稿。');
@@ -698,13 +731,18 @@ export function installStudio(host, owner, kind, css) {
                 try { img.src=url; await img.decode(); }
                 finally { URL.revokeObjectURL(url); }
                 const native = connection.imageProtocol === 'nai';
+                const nativeOptions = provider ? {
+                    aspect:connection[connection.imageProtocol + 'Aspect'], resolution:connection[connection.imageProtocol + 'Resolution'],
+                    ...(body.quality ? {quality:body.quality} : {})
+                } : undefined;
                 const row = {id:uniqueId(), source:source.key, text:source.text, index:source.index, blob,
                     date:Date.now(), model:body.model, naiModel:connection.naiModel, styleName:style?.name,
                     imageProvider:connection.imageProvider, imageProtocol:connection.imageProtocol, otherSize:connection.otherSize,
-                    draw, resultSize:{width:img.naturalWidth,height:img.naturalHeight},
+                    draw, nativeOptions, resultSize:{width:img.naturalWidth,height:img.naturalHeight},
                     seed:body.parameters?.seed,
-                    plan:native ? {base:body.input, negative:body.parameters.negative_prompt, characters:plan.characters} :
-                        {base:body.prompt,negative:'',characters:[]}};
+                    plan:native ? {base:body.input, negative:body.parameters.negative_prompt,
+                        characters:body.parameters.characterPrompts.map(role => ({positive:role.prompt,negative:role.uc}))} :
+                        {base:body.prompt ?? body.input,negative:'',characters:[]}};
                 try { await pictures.add(row); storedCount++; }
                 catch { temporaryPictures.set(source.key, [row,...(temporaryPictures.get(source.key)||[])]); }
                 completed++;
@@ -758,12 +796,12 @@ export function installStudio(host, owner, kind, css) {
         for (const [key,value] of Object.entries(defaults)) field(key).value = stored[key] ?? value;
         field('naiModel').value = knownNaiModel(text('naiModel')) ?? MODELS[0];
         field('naiBase').value = OFFICIAL_NAI;
-        for (const kind of ['vision','nai','other']) {
+        for (const kind of keyKinds) {
             const base = field(kind + 'Base'), key = field(kind + 'Key');
             key.value = readKey(kind,base.value);
             base.oninput = () => { key.value = readKey(kind,base.value); };
         }
-        field('remember').checked = ['vision','nai','other'].some(kind => rememberedKeys.get(keyId(kind,field(kind+'Base').value)));
+        field('remember').checked = keyKinds.some(kind => rememberedKeys.get(keyId(kind,field(kind+'Base').value)));
         field('contextCount').value = stored.preferences?.contextCount ?? 0;
         field('useArchive').checked = stored.preferences?.useArchive ?? true;
         field('toasts').checked = stored.preferences?.toasts ?? true;
@@ -795,7 +833,8 @@ export function installStudio(host, owner, kind, css) {
             settings().useVisionPreset = checked('useVisionPreset');
             save();
         };
-        for (const name of ['imageProvider','otherProtocol','otherSize']) field(name).onchange = syncImageFields;
+        for (const name of ['imageProvider','otherProtocol','otherSize','grokModel','grokAspect','grokResolution',
+            'geminiModel','geminiAspect','geminiResolution']) field(name).onchange = syncImageFields;
         field('otherModel').oninput = syncImageFields;
         field('floor').onchange = () => refresh();
         field('mode').onchange = () => refresh();

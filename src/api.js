@@ -1,10 +1,12 @@
 import {readPromptCompletion, parsePromptObject, sceneInstruction, normalizeScenePlan} from './planning.js';
 import {isNaiStream, finalNaiFrame} from './nai-stream.js';
+import {NATIVE_IMAGE_PROVIDERS, nativeImageBody, geminiFinalImage} from './image-providers.js';
+import {animeTagPlan, animeProsePrompt} from './anime-art.js';
 
 export const MODELS = ['nai-diffusion-4-5-full', 'nai-diffusion-5-full'];
 export const MODEL_NAMES = {[MODELS[0]]:'NAI 4.5 Full', [MODELS[1]]:'NAI 5 Full'};
 export const OFFICIAL_NAI = 'https://image.novelai.net';
-export const IMAGE_PATHS = {nai:'/ai/generate-image', openai:'/images/generations'};
+export const IMAGE_PATHS = {nai:'/ai/generate-image', openai:'/images/generations', grok:'/images/generations', gemini:'/interactions'};
 export const STYLE_FIELDS = ['line', 'color', 'light', 'rendering', 'composition'];
 export const SAMPLERS = {
     k_euler_ancestral:'Euler Ancestral',
@@ -34,9 +36,10 @@ export function drawOptions(values = {}) {
         count:number('count',1,4,'张数')};
 }
 
-export function finishPrompt(plan, style) {
-    return [plan.base, ...STYLE_FIELDS.map(k => style?.[k]), style?.positive]
-        .map(text => text?.trim()).filter(Boolean).join(', ');
+export function compileImagePrompt(protocol, plan, style) {
+    const cues = [...STYLE_FIELDS.map(k => style?.[k]),style?.positive].filter(Boolean);
+    if (protocol === 'nai') return animeTagPlan(plan,cues,style?.negative);
+    return {base:animeProsePrompt(plan,cues,style?.negative),negative:'',characters:[]};
 }
 
 export function knownNaiModel(model) {
@@ -72,7 +75,7 @@ function serviceError(status, payload, key = '') {
     return error;
 }
 
-async function request(url, key, body, signal, read) {
+async function request(url, key, body, signal, read, protocol) {
     const ctl = new AbortController();
     const stop = () => ctl.abort(signal.reason);
     if (signal?.aborted) stop();
@@ -80,7 +83,10 @@ async function request(url, key, body, signal, read) {
     const timer = setTimeout(() => ctl.abort('timeout'), 300000);
     try {
         const headers = {'Content-Type': 'application/json'};
-        if (key?.trim()) headers.Authorization = 'Bearer ' + key.trim();
+        if (protocol === 'gemini') {
+            if (key?.trim()) headers['x-goog-api-key'] = key.trim();
+            headers['Api-Revision'] = '2026-05-20';
+        } else if (key?.trim()) headers.Authorization = 'Bearer ' + key.trim();
         const r = await fetch(url, {method: 'POST', credentials: 'omit', redirect: 'error', signal: ctl.signal,
             headers, body: JSON.stringify(body)});
         if (!r.ok) throw serviceError(r.status,await r.text(),key);
@@ -118,9 +124,10 @@ export async function extractStyle(config, key, data, signal) {
 }
 
 export async function planScene(config, key, source, looks, signal) {
-    const compact = config.imageProtocol !== 'openai' && naiFormat(config) === MODELS[0];
+    const protocol = config.imageProtocol || 'nai';
+    const compact = protocol === 'nai' && naiFormat(config) === MODELS[0];
     const visible = source.visualText ?? source.text;
-    return jsonChat(config,key,sceneInstruction(compact),
+    return jsonChat(config,key,sceneInstruction(compact,protocol !== 'nai'),
         JSON.stringify({selectedReply:visible, speaker:source.speaker, optionalAppearance:looks,
             optionalPriorContext:source.background ?? [], requestedFocus:source.focus ?? ''}), signal,
         plan => normalizeScenePlan(plan,visible,compact ? 6 : 22));
@@ -132,32 +139,26 @@ export function naiBody(model, plan, style, options = {}) {
     if (!plan.base?.trim()) throw Error('请填写画面正面提示词。');
     if (plan.characters.length > (v5 ? 22 : 6)) throw Error('独立角色提示词超过当前模型的上限。');
     const draw = drawOptions(options);
-    const input = finishPrompt(plan, style);
-    const negative = [plan.negative,style?.negative].map(t => t?.trim()).filter(Boolean).join(', ');
-    const caption = key => plan.characters.map(c => ({char_caption:c[key] || '', centers:[{x:0.5,y:0.5}]}));
+    const {base:input,negative,characters} = compileImagePrompt('nai',plan,style);
+    const caption = key => characters.map(c => ({char_caption:c[key] || '', centers:[{x:0.5,y:0.5}]}));
     return {model, input, action:'generate', parameters:{
         params_version:v5 ? 4 : 3, width:draw.width, height:draw.height, steps:draw.steps, scale:draw.scale,
         sampler:draw.sampler, noise_schedule:'karras', n_samples:1, seed:draw.seed ?? crypto.getRandomValues(new Uint32Array(1))[0],
         image_format:'png', qualityToggle:!!options.quality, cfg_rescale:draw.rescale, negative_prompt:negative, use_coords:false,
         dynamic_thresholding:false, prefer_brownian:true, deliberate_euler_ancestral_bug:false,
-        ...(v5 ? {straight_alpha:true} : {}), characterPrompts:plan.characters.map(c => ({prompt:c.positive, uc:c.negative || '', center:{x:0.5,y:0.5}})),
+        ...(v5 ? {straight_alpha:true} : {}), characterPrompts:characters.map(c => ({prompt:c.positive, uc:c.negative || '', center:{x:0.5,y:0.5}})),
         v4_prompt:{caption:{base_caption:input, char_captions:caption('positive')}, use_coords:false, use_order:true},
         v4_negative_prompt:{caption:{base_caption:negative,char_captions:caption('negative')},legacy_uc:false}
     }};
 }
 
 export function makeImageBody(connection, plan, style, options) {
+    const protocol = connection.imageProtocol || 'nai';
     const model = connection.imageModel || connection.naiModel;
-    if (connection.imageProtocol !== 'openai') return {...naiBody(naiFormat(connection),plan,style,options),model};
-    if (!plan.base?.trim()) throw Error('请填写画面正面提示词。');
-    const parts = [finishPrompt(plan,style)];
-    const negatives = [plan.negative,style?.negative].map(value => value?.trim()).filter(Boolean);
-    plan.characters.forEach((character,index) => {
-        parts.push('Character ' + (index + 1) + ': ' + character.positive);
-        if (character.negative) parts.push('Avoid for this character: ' + character.negative);
-    });
-    if (negatives.length) parts.push('Avoid: ' + negatives.join(', '));
-    return {model, prompt:parts.join('\n'), n:1, size:connection.otherSize || 'auto'};
+    if (protocol === 'nai') return {...naiBody(naiFormat(connection),plan,style,options),model};
+    const prompt = compileImagePrompt(protocol,plan,style).base;
+    if (Object.hasOwn(NATIVE_IMAGE_PROVIDERS,protocol)) return nativeImageBody(protocol,connection,prompt);
+    return {model, prompt, n:1, size:connection.otherSize || 'auto'};
 }
 
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
@@ -195,6 +196,15 @@ export function generate(config, key, body, signal, onReceiving) {
     return request(endpoint(config.imageBase || config.naiBase, IMAGE_PATHS[protocol]), key, body, signal, async (r, requestSignal) => {
         onReceiving();
         const bytes = await imageResponseBytes(r,MAX_RESPONSE_BYTES,requestSignal);
+        if (protocol === 'gemini') {
+            let result;
+            try { result = JSON.parse(new TextDecoder().decode(bytes)); }
+            catch { throw Error('Gemini 生图接口未返回有效的 Interactions JSON。'); }
+            if (result?.error) throw serviceError(null,result.error,key);
+            const final = geminiFinalImage(result);
+            if (!final) throw Error('Gemini 未返回最终图片' + (result?.status ? '（' + result.status + '）' : '') + '。');
+            return requireImage(base64ImageBytes(final));
+        }
         return decodeImage(bytes,{
             contentType:r.headers.get('content-type') || '',
             signal:requestSignal,
@@ -209,7 +219,7 @@ export function generate(config, key, body, signal, onReceiving) {
                 return imageResponseBytes(download,MAX_IMAGE_BYTES,requestSignal);
             }
         });
-    });
+    },protocol);
 }
 
 function image(bytes) {
