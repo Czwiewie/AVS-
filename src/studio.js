@@ -1,11 +1,13 @@
 import {sourceAt, prose, optionalLooks, priorContext} from './scene.js';
-import {MODELS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, endpoint, extractStyle, planScene, generate, drawOptions, finishPrompt, naiBody, availableModels} from './api.js';
+import {MODELS, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, endpoint, extractStyle, planScene, generate, drawOptions, finishPrompt, makeImageBody, availableModels} from './api.js';
 import {pictureLibrary} from './library.js';
+import {createAcademyFeedback} from './theme.js';
+import {chatPresetManager, presetNames, visionPreset} from './presets.js';
 import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.0';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.3';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -16,8 +18,29 @@ export function installStudio(host, owner, kind, css) {
     const listeners = [];
     const localStyle = css ? document.createElement('style') : null;
     if (localStyle) { localStyle.textContent = css; document.head.append(localStyle); }
+    const viewportStyle = document.createElement('style');
+    document.head.append(viewportStyle);
+    const viewport = host.visualViewport;
+    function syncDialogViewport() {
+        const width = viewport?.width || host.innerWidth;
+        const height = viewport?.height || host.innerHeight;
+        viewportStyle.textContent = ':root {'
+            + '--avs-visible-top:' + (viewport?.offsetTop ?? 0) + 'px;'
+            + '--avs-visible-left:' + (viewport?.offsetLeft ?? 0) + 'px;'
+            + '--avs-visible-width:' + width + 'px;'
+            + '--avs-visible-height:' + height + 'px;}';
+    }
+    syncDialogViewport();
+    host.addEventListener('resize', syncDialogViewport);
+    for (const name of ['resize','scroll']) viewport?.addEventListener(name, syncDialogViewport);
+    listeners.push(() => {
+        host.removeEventListener('resize', syncDialogViewport);
+        for (const name of ['resize','scroll']) viewport?.removeEventListener(name, syncDialogViewport);
+        viewportStyle.remove();
+    });
     const id = 'avs-illustration-studio';
-    const defaults = {visionBase:'https://api.openai.com/v1', visionModel:'', naiBase:'https://image.novelai.net', naiModel:MODELS[0]};
+    const defaults = {visionBase:'https://api.openai.com/v1', visionModel:'', naiBase:OFFICIAL_NAI,
+        naiModel:MODELS[0], imageProvider:'official', otherProtocol:'openai', otherBase:'', otherModel:'', otherSize:'auto'};
     const styleNames = {line:'线条', color:'色彩', light:'光影', rendering:'渲染', composition:'构图'};
     const builtInPresets = [
         {id:'portrait', name:'剧情竖幅', draw:{width:832,height:1216}},
@@ -25,6 +48,7 @@ export function installStudio(host, owner, kind, css) {
         {id:'draft', name:'快速构图', draw:{width:768,height:768,steps:16}},
     ];
     const pictures = pictureLibrary(host, id);
+    const feedback = createAcademyFeedback(host);
     const uniqueId = () => host.crypto.randomUUID?.() ?? Array.from(host.crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8,'0')).join('');
     const temporaryPictures = new Map();
     let dialog, observer, entry, job, phase, activePage = 'draw', disposed = false, refreshVersion = 0;
@@ -46,7 +70,7 @@ export function installStudio(host, owner, kind, css) {
     }
     function notify(message, type = 'success') {
         setStatus(message, type);
-        if (checked('toasts')) host.toastr?.[type]?.(message, 'AVS 视觉工坊', {escapeHtml:true});
+        if (checked('toasts')) feedback.notice(message, type, 'AVS 视觉工坊');
     }
     function stage(name, complete = null, total = 1) {
         phase = name;
@@ -79,30 +103,95 @@ export function installStudio(host, owner, kind, css) {
         const name = keyId(kind, url);
         return sessionKeys.get(name) || rememberedKeys.get(name) || '';
     }
+    function writeKey(kind, url, key) {
+        const name = keyId(kind, url);
+        sessionKeys.set(name,key);
+        rememberedKeys.set(name,checked('remember') ? key : '');
+    }
+    function migrateImageConnection(stored) {
+        if (stored.imageProvider || !stored.naiBase) return;
+        let official = false;
+        try { official = new URL(stored.naiBase).origin === OFFICIAL_NAI; } catch { /* Keep the prior address for editing. */ }
+        if (stored.naiBase === OFFICIAL_NAI) return;
+        const old = keyId('nai',stored.naiBase);
+        if (!official) {
+            stored.imageProvider = 'other';
+            stored.otherProtocol = 'nai';
+            stored.otherBase = stored.naiBase;
+            stored.otherModel = stored.naiModel || MODELS[0];
+        }
+        const next = official ? keyId('nai', OFFICIAL_NAI) : keyId('other', stored.otherBase);
+        if (!sessionKeys.get(next)) sessionKeys.set(next, sessionKeys.get(old) || '');
+        if (!rememberedKeys.get(next)) rememberedKeys.set(next, rememberedKeys.get(old) || '');
+        stored.naiBase = OFFICIAL_NAI;
+        save();
+    }
+    function currentProtocol() {
+        return text('imageProvider') === 'official' ? 'nai' : text('otherProtocol');
+    }
+    function syncImageFields() {
+        const other = text('imageProvider') === 'other';
+        const generic = other && currentProtocol() === 'openai';
+        field('officialConnection').hidden = other;
+        field('otherConnection').hidden = !other;
+        field('otherSizeRow').hidden = !generic;
+        field('naiModelRow').hidden = generic;
+        field('naiModelLabel').textContent = other ? 'NovelAI 参数格式' : '生图模型';
+        field('canvasRow').hidden = generic;
+        field('seedRow').hidden = generic;
+        for (const detail of dialog.querySelectorAll('[data-nai-only]')) detail.hidden = generic;
+        field('otherDraw').hidden = !other;
+        field('otherDraw').textContent = other
+            ? '其它生图 API · ' + (text('otherModel') || '请在连接页选择模型') +
+                (generic ? ' · 画幅：' + (text('otherSize') === 'auto' ? '自动' : text('otherSize')) : '')
+            : '';
+        drawLabels();
+    }
     function readConnections({vision = false, image = false, persist = false} = {}) {
         const stored = settings();
         const connection = Object.fromEntries(Object.keys(defaults).map(key => [key, text(key)]));
-        if (vision || persist) endpoint(connection.visionBase,'/chat/completions');
-        if (image || persist) endpoint(connection.naiBase,'/ai/generate-image');
-        for (const kind of ['vision','nai']) {
-            const base = kind + 'Base', key = kind + 'Key';
-            connection[key] = text(key);
-            if (persist) {
-                const name = keyId(kind, connection[base]);
-                const old = keyId(kind, stored[base] || defaults[base]);
-                if (name !== old) { sessionKeys.set(old, ''); rememberedKeys.set(old, ''); }
-                sessionKeys.set(name, connection[key]);
-                rememberedKeys.set(name, checked('remember') ? connection[key] : '');
-            }
+        const other = connection.imageProvider === 'other';
+        connection.visionKey = text('visionKey');
+        connection.naiKey = text('naiKey');
+        connection.otherKey = text('otherKey');
+        connection.imageProtocol = currentProtocol();
+        connection.imageBase = other ? connection.otherBase : OFFICIAL_NAI;
+        connection.imageKey = other ? connection.otherKey : connection.naiKey;
+        connection.imageModel = other ? connection.otherModel : connection.naiModel;
+        if (vision || (persist && connection.visionBase)) endpoint(connection.visionBase,'/chat/completions');
+        if (image || (persist && connection.imageBase)) endpoint(connection.imageBase,IMAGE_PATHS[connection.imageProtocol]);
+        if (vision && checked('useVisionPreset')) {
+            const ctx = context();
+            connection.promptPreset = visionPreset(chatPresetManager(ctx), text('visionPresetName'), ctx);
         }
         if (persist) {
+            for (const kind of ['vision','nai','other']) {
+                const base = kind + 'Base';
+                const oldKey = keyId(kind, stored[base] || defaults[base]);
+                if (oldKey !== keyId(kind,connection[base])) {
+                    sessionKeys.set(oldKey,''); rememberedKeys.set(oldKey,'');
+                }
+                writeKey(kind,connection[base],connection[kind + 'Key']);
+            }
             for (const key of Object.keys(defaults)) stored[key] = connection[key];
             stored.preferences = {contextCount:Number(text('contextCount')), useArchive:checked('useArchive'), toasts:checked('toasts')};
+            stored.useVisionPreset = checked('useVisionPreset');
+            stored.visionPresetName = text('visionPresetName');
             save();
         }
         return connection;
     }
-
+    async function chooseVisionPreset() {
+        const choices = presetNames(chatPresetManager(context()));
+        if (!choices.length) throw Error('酒馆暂未提供可读的对话补全预设。');
+        const name = await feedback.choose('选择对话补全预设',choices,text('visionPresetName'));
+        if (name === null || disposed) return;
+        field('visionPresetName').value = name;
+        settings().visionPresetName = name;
+        settings().useVisionPreset = true;
+        save();
+        setStatus('已使用预设：' + name);
+    }
     function savedStyles() {
         const saved = settings();
         if (!Array.isArray(saved.styles)) {
@@ -153,7 +242,7 @@ export function installStudio(host, owner, kind, css) {
     }
     function drawLabels() {
         for (const key of ['steps','scale','rescale']) field(key + 'Out').textContent = text(key);
-        const custom = field('canvas').value === 'custom';
+        const custom = currentProtocol() !== 'openai' && field('canvas').value === 'custom';
         field('widthGroup').hidden = !custom;
         field('heightGroup').hidden = !custom;
     }
@@ -199,10 +288,10 @@ export function installStudio(host, owner, kind, css) {
         saveDraw();
         setStatus('已应用绘图预设「' + row.name + '」。');
     }
-    function deleteDrawPreset() {
+    async function deleteDrawPreset() {
         const saved = settings();
         const row = saved.drawingPresets?.find(preset => preset.id === text('drawPreset'));
-        if (!row || !host.confirm('删除绘图预设「' + row.name + '」？')) return;
+        if (!row || !(await feedback.confirm('删除绘图预设「' + row.name + '」？', {title:'删除绘图预设',accept:'删除',danger:true}))) return;
         saved.drawingPresets = saved.drawingPresets.filter(preset => preset.id !== row.id);
         save();
         populateDrawPresets();
@@ -228,10 +317,10 @@ export function installStudio(host, owner, kind, css) {
     function floorLabel(index) { return index === null ? '手写提示词' : '第 ' + index + ' 楼'; }
     function portraitFile(row) { return 'AVS-' + (row.index ?? 'manual') + '-' + (row.seed ?? 'original') + '.' + row.blob.type.split('/')[1]; }
 
-    function modelLabel(model) { return model === MODELS[0] ? 'NAI 4.5 Full' : 'NAI 5 Full'; }
+    function modelLabel(model) { return model === MODELS[0] ? 'NAI 4.5 Full' : model === MODELS[1] ? 'NAI 5 Full' : model; }
     function pictureLabel(row) {
         return row.model ? [
-            modelLabel(row.model), row.draw.width + '×' + row.draw.height, '种子 ' + row.seed, row.styleName
+            modelLabel(row.model), (row.resultSize?.width ?? row.draw.width) + '×' + (row.resultSize?.height ?? row.draw.height), row.seed == null ? '' : '种子 ' + row.seed, row.styleName
         ].filter(Boolean).join(' · ') : '旧版预览';
     }
     function paintPreview(row, history = false) {
@@ -265,7 +354,7 @@ export function installStudio(host, owner, kind, css) {
             const thumb = document.createElement('img'), label = document.createElement('span');
             thumb.alt = ''; thumb.loading = 'lazy';
             const url = URL.createObjectURL(row.blob); thumbnailUrls.push(url); thumb.src = url;
-            label.textContent = row.date ? '种子 ' + (row.seed ?? index+1) : '旧版预览';
+            label.textContent = row.date ? (row.seed == null ? '图 ' + (index+1) : '种子 ' + row.seed) : '旧版预览';
             button.title = row.date ? new Date(row.date).toLocaleString() : '旧版预览';
             button.append(thumb,label);
             button.onclick = () => inspect(row);
@@ -311,7 +400,7 @@ export function installStudio(host, owner, kind, css) {
         const box = field('metadataBox');
         box.hidden = !row?.plan;
         if (box.hidden) return;
-        const params = [
+        const params = row.imageProtocol === 'openai' ? [['接口','OpenAI 兼容'], ['请求画幅',row.otherSize]] : [
             ['采样器',SAMPLERS[row.draw.sampler]], ['步数',row.draw.steps],
             ['引导强度',row.draw.scale], ['CFG Rescale',row.draw.rescale],
             ['自动质量标签',row.draw.quality ? '开启' : '关闭']
@@ -371,7 +460,7 @@ export function installStudio(host, owner, kind, css) {
     }
 
     function addRole(role = {}) {
-        const count = field('roles').children.length, limit = text('naiModel') === MODELS[0] ? 6 : 22;
+        const count = field('roles').children.length, limit = currentProtocol() !== 'openai' && text('naiModel') === MODELS[0] ? 6 : 22;
         if (count >= limit) throw Error('当前模型最多支持 ' + limit + ' 个独立人物提示词。');
         const card = document.createElement('fieldset');
         card.className = 'studio-role studio-stack';
@@ -419,15 +508,22 @@ export function installStudio(host, owner, kind, css) {
         if (!detail?.plan) return;
         const source = selectedSource();
         const {model, plan, draw, seed} = detail;
-        field('naiModel').value = model;
+        field('imageProvider').value = detail.imageProvider || 'official';
+        if (detail.imageProvider === 'other') {
+            field('otherModel').value = model;
+            field('otherProtocol').value = detail.imageProtocol;
+            field('otherSize').value = detail.otherSize || 'auto';
+        }
+        field('naiModel').value = detail.naiModel || (MODELS.includes(model) ? model : MODELS[0]);
         setDraw({...draw, seed, count:1}); saveDraw();
+        syncImageFields();
         setDraft(plan, source.index === null ? null : source, false);
         go('prompts');
         setStatus('已载入当时的提示词、参数与种子。');
     }
     async function removeHistory() {
         const record = detail;
-        if (!record?.id || !host.confirm('删除这张本机历史图片？')) return;
+        if (!record?.id || !(await feedback.confirm('删除这张本机历史图片？', {title:'删除历史插画',accept:'删除',danger:true}))) return;
         const temporary = temporaryPictures.get(record.source) ?? [];
         if (temporary.some(row => row.id === record.id)) {
             temporaryPictures.set(record.source, temporary.filter(row => row.id !== record.id));
@@ -488,13 +584,34 @@ export function installStudio(host, owner, kind, css) {
         addStyle({name,...extracted}, false);
         notify('已新建画风「' + name + '」。');
     }
-    async function listModels(signal) {
-        const connection = readConnections({vision:true});
-        stage('等待视觉接口返回模型列表');
-        const models = await availableModels(connection.visionBase, connection.visionKey, signal);
-        const list = dialog.querySelector('#avs-studio-models');
-        list.replaceChildren(...models.map(name => new Option(name,name)));
-        setStatus(models.length ? '已读取 ' + models.length + ' 个模型。点击模型栏搜索或选择。' : '接口返回空列表，可手填模型名。');
+    async function listModels(signal, kind = 'vision') {
+        const modelField = kind + 'Model';
+        const url = text(kind + 'Base'), key = text(kind + 'Key');
+        const suffix = kind === 'vision' ? '/chat/completions' : IMAGE_PATHS[text('otherProtocol')];
+        stage('等待接口返回模型列表');
+        const models = await availableModels(url,key,signal,suffix);
+        if (!models.length) {
+            setStatus('接口返回空列表，可手填模型名。');
+            return;
+        }
+        if (!dialog.open || disposed) return;
+        field('progressBox').hidden = true;
+        const model = await feedback.choose('选择' + (kind === 'vision' ? '视觉模型' : '生图模型') + ' · ' + models.length + ' 个',
+            models,text(modelField));
+        if (model === null || disposed || signal.aborted) return;
+        field(modelField).value = model;
+        const stored = settings();
+        stored[kind + 'Base'] = url;
+        stored[modelField] = model;
+        if (kind === 'other') {
+            stored.imageProvider = 'other';
+            stored.otherProtocol = text('otherProtocol');
+            stored.otherSize = text('otherSize');
+        }
+        writeKey(kind,url,key);
+        save();
+        syncImageFields();
+        setStatus('已使用模型：' + model);
     }
     async function compile(source, connection, signal) {
         if (source.index === null) throw Error('请选择 AI 回复作为画面来源。');
@@ -530,7 +647,8 @@ export function installStudio(host, owner, kind, css) {
         const useDraft = edited || source.index === null;
         const connection = readConnections({vision:!useDraft, image:true});
         const draw = readDraw();
-        if (!connection.naiKey) throw Error('请在「连接」中填写 NovelAI Token。');
+        if (connection.imageProvider === 'official' && !connection.imageKey) throw Error('请在「连接」中填写 NovelAI Token。');
+        if (!connection.imageModel) throw Error('请在「连接」选择或填写生图模型。');
         if (edited && source.index !== null && draftAnchor && !isSelected(draftAnchor)) {
             throw Error('草稿来自另一条回复。请选择原楼层，或从当前楼层重新提取草稿。');
         }
@@ -545,15 +663,22 @@ export function installStudio(host, owner, kind, css) {
                 signal.throwIfAborted();
                 if (!matches(source)) throw Error('原楼层已变更，剩余图片已停止。');
                 const seed = draw.seed === null ? '' : (draw.seed + i) % 4294967296;
-                const body = naiBody(connection.naiModel,plan,style,{...draw,seed});
-                stage('等待 NovelAI 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
-                const blob = await generate(connection,connection.naiKey,body,signal, () => stage('读取第 ' + (i+1) + ' 张回图',i,draw.count));
+                const body = makeImageBody(connection,plan,style,{...draw,seed});
+                const service = connection.imageProvider === 'official' ? 'NovelAI' : '其它生图 API';
+                stage('等待 ' + service + ' 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
+                const blob = await generate(connection,connection.imageKey,body,signal, () => stage('读取第 ' + (i+1) + ' 张回图',i,draw.count));
                 const url = URL.createObjectURL(blob);
-                try { const img = new Image(); img.src=url; await img.decode(); }
+                const img = new Image();
+                try { img.src=url; await img.decode(); }
                 finally { URL.revokeObjectURL(url); }
+                const native = connection.imageProtocol === 'nai';
                 const row = {id:uniqueId(), source:source.key, text:source.text, index:source.index, blob,
-                    date:Date.now(), model:connection.naiModel, draw, seed:body.parameters.seed, styleName:style?.name,
-                    plan:{base:body.input, negative:body.parameters.negative_prompt, characters:plan.characters}};
+                    date:Date.now(), model:body.model, naiModel:connection.naiModel, styleName:style?.name,
+                    imageProvider:connection.imageProvider, imageProtocol:connection.imageProtocol, otherSize:connection.otherSize,
+                    draw, resultSize:{width:img.naturalWidth,height:img.naturalHeight},
+                    seed:body.parameters?.seed,
+                    plan:native ? {base:body.input, negative:body.parameters.negative_prompt, characters:plan.characters} :
+                        {base:body.prompt,negative:'',characters:[]}};
                 try { await pictures.add(row); storedCount++; }
                 catch { temporaryPictures.set(source.key, [row,...(temporaryPictures.get(source.key)||[])]); }
                 completed++;
@@ -600,17 +725,23 @@ export function installStudio(host, owner, kind, css) {
             label.append(input); field('styleFields').append(label);
         }
         const stored = settings();
+        migrateImageConnection(stored);
         for (const [key,value] of Object.entries(defaults)) field(key).value = stored[key] ?? value;
-        for (const kind of ['vision','nai']) {
+        field('naiBase').value = OFFICIAL_NAI;
+        for (const kind of ['vision','nai','other']) {
             const base = field(kind + 'Base'), key = field(kind + 'Key');
             key.value = readKey(kind,base.value);
             base.oninput = () => { key.value = readKey(kind,base.value); };
         }
-        field('remember').checked = ['vision','nai'].some(kind => rememberedKeys.get(keyId(kind,field(kind+'Base').value)));
+        field('remember').checked = ['vision','nai','other'].some(kind => rememberedKeys.get(keyId(kind,field(kind+'Base').value)));
         field('contextCount').value = stored.preferences?.contextCount ?? 0;
         field('useArchive').checked = stored.preferences?.useArchive ?? true;
         field('toasts').checked = stored.preferences?.toasts ?? true;
+        field('visionPresetName').value = stored.visionPresetName || '';
+        field('useVisionPreset').checked = !!stored.useVisionPreset;
+        field('visionPresetRow').hidden = !checked('useVisionPreset');
         setDraw(stored.draw);
+        syncImageFields();
         populateDrawPresets();
         populateStyles();
         setDraft({base:'',negative:'',characters:[]});
@@ -623,6 +754,13 @@ export function installStudio(host, owner, kind, css) {
             drawLabels();
         };
         for (const key of ['steps','scale','rescale']) field(key).oninput = drawLabels;
+        field('useVisionPreset').onchange = () => {
+            field('visionPresetRow').hidden = !checked('useVisionPreset');
+            settings().useVisionPreset = checked('useVisionPreset');
+            save();
+        };
+        for (const name of ['imageProvider','otherProtocol','otherSize']) field(name).onchange = syncImageFields;
+        field('otherModel').oninput = syncImageFields;
         field('floor').onchange = () => refresh();
         field('mode').onchange = () => refresh();
         field('drawPreset').onchange = () => {
@@ -643,7 +781,9 @@ export function installStudio(host, owner, kind, css) {
         action('presetApply', applyDrawPreset);
         action('presetSave', storeDrawPreset);
         action('presetDelete', deleteDrawPreset);
-        action('models', () => run(listModels));
+        action('models', () => run(signal => listModels(signal)));
+        action('otherModels', () => run(signal => listModels(signal,'other')));
+        action('chooseVisionPreset', chooseVisionPreset);
         action('addRole', () => addRole());
         action('copyPrompt', copyPrompt);
         action('plan', () => run(createDraft));
@@ -651,9 +791,9 @@ export function installStudio(host, owner, kind, css) {
         action('drawDraft', () => run(signal => illustrate(signal,true)));
         action('styleUpdate', () => saveStyle(true));
         action('styleNew', () => saveStyle(false));
-        action('styleRemove', () => {
+        action('styleRemove', async () => {
             const selected = activeStyle();
-            if (!selected || !host.confirm('删除画风「' + selected.name + '」？')) return;
+            if (!selected || !(await feedback.confirm('删除画风「' + selected.name + '」？', {title:'删除画风',accept:'删除',danger:true}))) return;
             const data = settings(); data.styles = savedStyles().filter(style => style.id !== selected.id);
             data.selectedStyle = data.styles.at(0)?.id || ''; save(); populateStyles(); setStatus('已删除画风。');
         });
@@ -677,7 +817,7 @@ export function installStudio(host, owner, kind, css) {
         try {
             context();
             if (!dialog) build();
-            if (!dialog.open) { dialog.showModal(); refresh(); }
+            if (!dialog.open) { syncDialogViewport(); dialog.showModal(); refresh(); }
             return {ok:true};
         } catch(error) { return {ok:false,error:error.message}; }
     }
@@ -692,10 +832,7 @@ export function installStudio(host, owner, kind, css) {
     }
     function openFromMenu() {
         const result = open();
-        if (!result.ok) {
-            if (host.toastr?.error) host.toastr.error(result.error,'AVS 视觉工坊',{escapeHtml:true});
-            else host.alert(result.error);
-        }
+        if (!result.ok) feedback.notice(result.error,'error','AVS 视觉工坊');
         return result;
     }
     function mount() {
@@ -708,6 +845,7 @@ export function installStudio(host, owner, kind, css) {
         entry.onclick = openFromMenu; menu.append(entry);
     }
     const api = {kind,owner,version,open,openFromMenu,activate:visible,
+        academyConfirm:feedback.confirm, academyNotice:feedback.notice,
         async verifyVisible() {
             await new Promise(resolve => host.requestAnimationFrame(() => host.requestAnimationFrame(resolve)));
             return visible();
@@ -715,7 +853,7 @@ export function installStudio(host, owner, kind, css) {
         close() { if (dialog?.open) dialog.close(); },
         dispose() {
             if (disposed) return;
-            disposed = true; job?.abort('user'); observer?.disconnect();
+            disposed = true; job?.abort('user'); observer?.disconnect(); feedback.dispose();
             for (const remove of listeners) remove();
             if (previewUrl) URL.revokeObjectURL(previewUrl);
             if (historyUrl) URL.revokeObjectURL(historyUrl);

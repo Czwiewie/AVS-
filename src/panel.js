@@ -30,15 +30,16 @@ export function workshopPanel(samplers) {
         <details class="studio-card" open>
           <summary>模型与画布</summary>
           <div class="studio-grid">
-            <label>生图模型<select data-field="naiModel" data-lock><option value="nai-diffusion-4-5-full">NAI 4.5 Full</option><option value="nai-diffusion-5-full">NAI 5 Full</option></select></label>
-            <label>画幅<select data-field="canvas" data-lock>${sizes}<option value="custom">自定义</option></select></label>
+            <label data-field="naiModelRow"><span data-field="naiModelLabel">生图模型</span><select data-field="naiModel" data-lock><option value="nai-diffusion-4-5-full">NAI 4.5 Full</option><option value="nai-diffusion-5-full">NAI 5 Full</option></select></label>
+            <label data-field="canvasRow">画幅<select data-field="canvas" data-lock>${sizes}<option value="custom">自定义</option></select></label>
             <label data-field="widthGroup">宽度<input type="number" data-field="width" step="64" min="64" max="2048" data-lock></label>
             <label data-field="heightGroup">高度<input type="number" data-field="height" step="64" min="64" max="2048" data-lock></label>
             <label>每次张数<select data-field="count" data-lock><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
-            <label>种子<input type="number" data-field="seed" min="0" max="4294967295" placeholder="留空为随机" data-lock></label>
+            <label data-field="seedRow">种子<input type="number" data-field="seed" min="0" max="4294967295" placeholder="留空为随机" data-lock></label>
           </div>
+          <p class="studio-note" data-field="otherDraw" hidden></p>
         </details>
-        <details class="studio-card">
+        <details class="studio-card" data-nai-only>
           <summary>绘图预设</summary>
           <div class="studio-row">
             <label class="studio-grow">选择预设<select data-field="drawPreset" data-lock></select></label>
@@ -50,7 +51,7 @@ export function workshopPanel(samplers) {
             <button type="button" data-field="presetDelete" data-lock>删除自定义预设</button>
           </div>
         </details>
-        <details class="studio-card">
+        <details class="studio-card" data-nai-only>
           <summary>采样与出图偏好</summary>
           <div class="studio-grid">
             <label>采样器<select data-field="sampler" data-lock>${samplerOptions}</select></label>
@@ -141,12 +142,39 @@ export function workshopPanel(samplers) {
         <div class="studio-card studio-stack">
           <h4>视觉提示词 API</h4>
           <label>API 地址<input data-field="visionBase" type="url" data-lock></label>
-          <div class="studio-row"><label class="studio-grow">视觉模型名<input data-field="visionModel" list="avs-studio-models" data-lock><datalist id="avs-studio-models"></datalist></label>
+          <div class="studio-row"><label class="studio-grow">视觉模型名<input data-field="visionModel" autocomplete="off" data-lock></label>
             <button type="button" data-field="models" data-lock>获取模型</button></div>
           <label>视觉 API 密钥<input data-field="visionKey" type="password" autocomplete="off" data-lock></label>
-          <h4>NovelAI 生图 API</h4>
-          <label>API 地址<input data-field="naiBase" type="url" data-lock></label>
-          <label>NovelAI Token<input data-field="naiKey" type="password" autocomplete="off" data-lock></label>
+          <label class="studio-check"><input data-field="useVisionPreset" type="checkbox" data-lock>使用对话补全预设</label>
+          <div class="studio-row" data-field="visionPresetRow" hidden>
+            <label class="studio-grow">所选预设<input data-field="visionPresetName" readonly placeholder="请选预设"></label>
+            <button type="button" data-field="chooseVisionPreset" data-lock>选择预设</button>
+          </div>
+          <h4>生图连接</h4>
+          <label>使用的接口<select data-field="imageProvider" data-lock>
+            <option value="official">NovelAI 官方生图 API</option>
+            <option value="other">其它生图 API</option>
+          </select></label>
+          <div class="studio-stack" data-field="officialConnection">
+            <label>API 地址<input data-field="naiBase" type="url" readonly></label>
+            <label>NovelAI Token<input data-field="naiKey" type="password" autocomplete="off" data-lock></label>
+          </div>
+          <div class="studio-stack" data-field="otherConnection" hidden>
+            <label>兼容协议<select data-field="otherProtocol" data-lock>
+              <option value="openai">OpenAI 兼容图片生成</option>
+              <option value="nai">NovelAI 兼容图片生成</option>
+            </select></label>
+            <label>API 地址<input data-field="otherBase" type="url" data-lock></label>
+            <label>API 密钥<input data-field="otherKey" type="password" autocomplete="off" data-lock></label>
+            <div class="studio-row"><label class="studio-grow">生图模型名<input data-field="otherModel" autocomplete="off" data-lock></label>
+              <button type="button" data-field="otherModels" data-lock>获取模型</button></div>
+            <label data-field="otherSizeRow">画幅<select data-field="otherSize" data-lock>
+              <option value="auto">由服务商决定</option>
+              <option value="1024x1024">方形 · 1024 × 1024</option>
+              <option value="1024x1536">竖幅 · 1024 × 1536</option>
+              <option value="1536x1024">横幅 · 1536 × 1024</option>
+            </select></label>
+          </div>
           <label class="studio-check"><input data-field="remember" type="checkbox" data-lock>在此浏览器记住密钥</label>
         </div>
         <div class="studio-card studio-stack">
