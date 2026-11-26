@@ -1,3 +1,5 @@
+import {MODEL_NAMES} from './api.js';
+
 export const STUDIO_PAGES = {
     draw:'绘图', prompts:'提示词', styles:'画风', gallery:'历史', settings:'连接'
 };
@@ -11,11 +13,18 @@ export function workshopPanel(samplers) {
     const sizes = Object.entries(CANVASES).map(([key,label]) =>
         `<option value="${key}">${label} · ${key.replace('x',' × ')}</option>`).join('');
     const samplerOptions = Object.entries(samplers).map(([key,label]) => `<option value="${key}">${label}</option>`).join('');
+    const modelButtons = Object.entries(MODEL_NAMES).map(([id, label]) =>
+        `<button type="button" data-nai-model="${id}" aria-pressed="false" data-lock>${label}</button>`).join('');
     return `
     <header><h2>AVS 视觉工坊</h2><button type="button" data-field="close">关闭</button></header>
     <nav class="studio-nav" aria-label="视觉工坊页面">${tabButtons}</nav>
     <div class="studio-scroll" data-field="scroll">
       <section data-page="draw">
+        <fieldset class="studio-models" data-field="naiModelRow">
+          <legend data-field="naiModelLabel">生图模型</legend>
+          <div class="studio-model-buttons">${modelButtons}</div>
+          <input type="hidden" data-field="naiModel">
+        </fieldset>
         <h3>画面来源</h3>
         <div class="studio-grid">
           <label>绘图方式<select data-field="mode" data-lock><option value="scene">AI 楼层配图</option><option value="manual">手写提示词</option></select></label>
@@ -28,9 +37,8 @@ export function workshopPanel(samplers) {
           <button type="button" data-jump="prompts">编辑提示词</button>
         </div>
         <details class="studio-card" open>
-          <summary>模型与画布</summary>
+          <summary>画布与张数</summary>
           <div class="studio-grid">
-            <label data-field="naiModelRow"><span data-field="naiModelLabel">生图模型</span><select data-field="naiModel" data-lock><option value="nai-diffusion-4-5-full">NAI 4.5 Full</option><option value="nai-diffusion-5-full">NAI 5 Full</option></select></label>
             <label data-field="canvasRow">画幅<select data-field="canvas" data-lock>${sizes}<option value="custom">自定义</option></select></label>
             <label data-field="widthGroup">宽度<input type="number" data-field="width" step="64" min="64" max="2048" data-lock></label>
             <label data-field="heightGroup">高度<input type="number" data-field="height" step="64" min="64" max="2048" data-lock></label>

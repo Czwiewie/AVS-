@@ -1,5 +1,5 @@
 import {sourceAt, prose, optionalLooks, priorContext} from './scene.js';
-import {MODELS, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, endpoint, extractStyle, planScene, generate, drawOptions, finishPrompt, makeImageBody, availableModels} from './api.js';
+import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, endpoint, extractStyle, planScene, generate, drawOptions, finishPrompt, makeImageBody, availableModels} from './api.js';
 import {pictureLibrary} from './library.js';
 import {createAcademyFeedback} from './theme.js';
 import {chatPresetManager, presetNames, visionPreset} from './presets.js';
@@ -7,7 +7,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.3';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.4';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -129,14 +129,39 @@ export function installStudio(host, owner, kind, css) {
     function currentProtocol() {
         return text('imageProvider') === 'official' ? 'nai' : text('otherProtocol');
     }
+    function thirdPartyNaiModel() {
+        if (text('imageProvider') === 'other') return knownNaiModel(text('otherModel'));
+    }
+    function selectedNaiModel() {
+        return thirdPartyNaiModel() ?? text('naiModel');
+    }
+    function selectNaiModel(model) {
+        if (!MODELS.includes(model) || model === selectedNaiModel()) return;
+        const stored = settings();
+        if (thirdPartyNaiModel()) {
+            field('otherModel').value = model;
+            if (stored.imageProvider === 'other' && stored.otherBase === text('otherBase') &&
+                stored.otherProtocol === currentProtocol()) stored.otherModel = model;
+        } else {
+            field('naiModel').value = model;
+            stored.naiModel = model;
+        }
+        save();
+        syncImageFields();
+    }
     function syncImageFields() {
         const other = text('imageProvider') === 'other';
         const generic = other && currentProtocol() === 'openai';
+        const explicitModel = thirdPartyNaiModel();
         field('officialConnection').hidden = other;
         field('otherConnection').hidden = !other;
         field('otherSizeRow').hidden = !generic;
-        field('naiModelRow').hidden = generic;
-        field('naiModelLabel').textContent = other ? 'NovelAI 参数格式' : '生图模型';
+        field('naiModelRow').hidden = generic && !explicitModel;
+        field('naiModelLabel').textContent = other && !explicitModel ? 'NovelAI 参数格式' : '生图模型';
+        const selected = selectedNaiModel();
+        for (const button of dialog.querySelectorAll('[data-nai-model]')) {
+            button.setAttribute('aria-pressed', String(button.dataset.naiModel === selected));
+        }
         field('canvasRow').hidden = generic;
         field('seedRow').hidden = generic;
         for (const detail of dialog.querySelectorAll('[data-nai-only]')) detail.hidden = generic;
@@ -179,6 +204,7 @@ export function installStudio(host, owner, kind, css) {
             stored.visionPresetName = text('visionPresetName');
             save();
         }
+        connection.naiModel = selectedNaiModel();
         return connection;
     }
     async function chooseVisionPreset() {
@@ -273,7 +299,7 @@ export function installStudio(host, owner, kind, css) {
         const name = text('presetName');
         if (!name) throw Error('请输入自定义预设名称。');
         const saved = settings();
-        const row = {id:uniqueId(), name, draw:readDraw(), model:text('naiModel')};
+        const row = {id:uniqueId(), name, draw:readDraw(), model:selectedNaiModel()};
         saved.drawingPresets = [...(saved.drawingPresets ?? []), row];
         save();
         populateDrawPresets(row.id);
@@ -283,7 +309,7 @@ export function installStudio(host, owner, kind, css) {
     function applyDrawPreset() {
         const row = drawingPresets().find(preset => preset.id === text('drawPreset'));
         if (!row) return;
-        if (row.model) field('naiModel').value = row.model;
+        if (row.model) selectNaiModel(row.model);
         setDraw(row.draw);
         saveDraw();
         setStatus('已应用绘图预设「' + row.name + '」。');
@@ -317,7 +343,7 @@ export function installStudio(host, owner, kind, css) {
     function floorLabel(index) { return index === null ? '手写提示词' : '第 ' + index + ' 楼'; }
     function portraitFile(row) { return 'AVS-' + (row.index ?? 'manual') + '-' + (row.seed ?? 'original') + '.' + row.blob.type.split('/')[1]; }
 
-    function modelLabel(model) { return model === MODELS[0] ? 'NAI 4.5 Full' : model === MODELS[1] ? 'NAI 5 Full' : model; }
+    function modelLabel(model) { return MODEL_NAMES[knownNaiModel(model)] ?? model; }
     function pictureLabel(row) {
         return row.model ? [
             modelLabel(row.model), (row.resultSize?.width ?? row.draw.width) + '×' + (row.resultSize?.height ?? row.draw.height), row.seed == null ? '' : '种子 ' + row.seed, row.styleName
@@ -460,7 +486,7 @@ export function installStudio(host, owner, kind, css) {
     }
 
     function addRole(role = {}) {
-        const count = field('roles').children.length, limit = currentProtocol() !== 'openai' && text('naiModel') === MODELS[0] ? 6 : 22;
+        const count = field('roles').children.length, limit = currentProtocol() !== 'openai' && selectedNaiModel() === MODELS[0] ? 6 : 22;
         if (count >= limit) throw Error('当前模型最多支持 ' + limit + ' 个独立人物提示词。');
         const card = document.createElement('fieldset');
         card.className = 'studio-role studio-stack';
@@ -514,7 +540,7 @@ export function installStudio(host, owner, kind, css) {
             field('otherProtocol').value = detail.imageProtocol;
             field('otherSize').value = detail.otherSize || 'auto';
         }
-        field('naiModel').value = detail.naiModel || (MODELS.includes(model) ? model : MODELS[0]);
+        field('naiModel').value = knownNaiModel(detail.naiModel) ?? knownNaiModel(model) ?? MODELS[0];
         setDraw({...draw, seed, count:1}); saveDraw();
         syncImageFields();
         setDraft(plan, source.index === null ? null : source, false);
@@ -664,8 +690,7 @@ export function installStudio(host, owner, kind, css) {
                 if (!matches(source)) throw Error('原楼层已变更，剩余图片已停止。');
                 const seed = draw.seed === null ? '' : (draw.seed + i) % 4294967296;
                 const body = makeImageBody(connection,plan,style,{...draw,seed});
-                const service = connection.imageProvider === 'official' ? 'NovelAI' : '其它生图 API';
-                stage('等待 ' + service + ' 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
+                stage('等待 ' + modelLabel(body.model) + ' 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
                 const blob = await generate(connection,connection.imageKey,body,signal, () => stage('读取第 ' + (i+1) + ' 张回图',i,draw.count));
                 const url = URL.createObjectURL(blob);
                 const img = new Image();
@@ -727,6 +752,7 @@ export function installStudio(host, owner, kind, css) {
         const stored = settings();
         migrateImageConnection(stored);
         for (const [key,value] of Object.entries(defaults)) field(key).value = stored[key] ?? value;
+        field('naiModel').value = knownNaiModel(text('naiModel')) ?? MODELS[0];
         field('naiBase').value = OFFICIAL_NAI;
         for (const kind of ['vision','nai','other']) {
             const base = field(kind + 'Base'), key = field(kind + 'Key');
@@ -747,6 +773,12 @@ export function installStudio(host, owner, kind, css) {
         setDraft({base:'',negative:'',characters:[]});
         for (const button of dialog.querySelectorAll('[data-tab],[data-jump]')) {
             button.onclick = () => go(button.dataset.tab || button.dataset.jump);
+        }
+        for (const button of dialog.querySelectorAll('[data-nai-model]')) {
+            button.onclick = () => {
+                selectNaiModel(button.dataset.naiModel);
+                setStatus('已选择 ' + modelLabel(button.dataset.naiModel) + '。');
+            };
         }
         field('canvas').onchange = () => {
             const size = text('canvas');
