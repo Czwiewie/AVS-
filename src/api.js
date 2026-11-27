@@ -1,4 +1,7 @@
+import {normalizeComicPlan} from './comics.js';
 import {prepareIdentityRoles} from './identity.js';
+import {renderShot} from './shots.js';
+import {preciseReferenceParameters} from './nai-reference.js';
 import {readPromptCompletion, parsePromptObject, sceneInstruction, normalizeScenePlan} from './planning.js';
 import {isNaiStream, finalNaiFrame} from './nai-stream.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageBody, geminiFinalImage} from './image-providers.js';
@@ -38,8 +41,9 @@ export function drawOptions(values = {}) {
 }
 
 export function compileImagePrompt(protocol, plan, style) {
-    if (protocol === 'nai') return animeTagPlan(plan,style);
-    return {base:animeProsePrompt(plan,style),negative:'',characters:[]};
+    const rendered = renderShot(plan,protocol);
+    if (protocol === 'nai') return animeTagPlan(rendered,style);
+    return {base:animeProsePrompt(rendered,style),negative:'',characters:[]};
 }
 
 export function knownNaiModel(model) {
@@ -134,37 +138,51 @@ export async function extractStyle(config, key, data, signal) {
         });
 }
 
-export async function planScene(config, key, source, looks, signal) {
-    const protocol = config.imageProtocol || 'nai';
-    const compact = protocol === 'nai' && naiFormat(config) === MODELS[0];
-    const visible = source.selectedText ?? source.visualText ?? source.text;
-    const natural = protocol !== 'nai';
+function scenePlannerInput(source,looks) {
     const appearance = looks.filter(({facts,items,identity}) => identity || Object.keys(facts).length || items.length)
         .map(({id,name,facts,items,identity}) => ({archiveId:id,name,facts,items,
             fandomIdentity:identity && {name:identity.romanName || identity.name,work:identity.work,aliases:identity.aliases,
                 features:identity.features}}));
-    return jsonChat(config,key,sceneInstruction(compact,natural),
-        JSON.stringify({selectedReply:visible, speaker:source.speaker, optionalAppearance:appearance,
-            optionalPriorContext:source.background ?? [], earlierInSameReply:source.earlierInReply ?? '',
-            archiveTiming:source.passage ? 'before this reply' : 'selected reply', requestedFocus:source.focus ?? ''}), signal,
-        plan => prepareIdentityRoles(normalizeScenePlan(plan,visible,compact ? 6 : 22),looks,source,natural));
+    return {selectedReply:source.selectedText ?? source.visualText ?? source.text, speaker:source.speaker,
+        optionalAppearance:appearance,optionalPriorContext:source.background ?? [],
+        earlierInSameReply:source.earlierInReply ?? '',archiveTiming:source.passage ? 'before this reply' : 'selected reply',
+        requestedFocus:source.focus ?? ''};
+}
+
+export async function planScene(config, key, source, looks, signal) {
+    const protocol = config.imageProtocol || 'nai';
+    const compact = protocol === 'nai' && naiFormat(config) === MODELS[0];
+    const input = scenePlannerInput(source,looks);
+    return jsonChat(config,key,sceneInstruction(compact),JSON.stringify(input),signal,plan =>
+        prepareIdentityRoles(normalizeScenePlan(plan,input.selectedReply,compact ? 6 : 22),looks,source,protocol !== 'nai'));
+}
+
+export async function planComic(config,key,source,looks,spec,signal) {
+    const protocol = config.imageProtocol || 'nai';
+    const compact = protocol === 'nai' && naiFormat(config) === MODELS[0];
+    const input = {...scenePlannerInput(source,looks),
+        requestedComic:{panelCount:spec.count,pages:spec.pages,readOrder:spec.cells.map(([, ,w,h])=>Math.round(100*w/h*2/3)/100)}};
+    return jsonChat(config,key,sceneInstruction(compact,true),JSON.stringify(input),signal,plan =>
+        normalizeComicPlan(plan,spec,source,looks,compact ? 6 : 22,protocol !== 'nai'));
 }
 
 export function naiBody(model, plan, style, options = {}) {
     if (!MODELS.includes(model)) throw Error('请选择 NAI 4.5 Full 或 NAI 5 Full。');
     const v5 = model === MODELS[1];
     if (!plan.base?.trim()) throw Error('请填写画面正面提示词。');
-    if (plan.characters.length > (v5 ? 22 : 6)) throw Error('独立角色提示词超过当前模型的上限。');
     const draw = drawOptions(options);
     const {base:input,negative,characters} = compileImagePrompt('nai',plan,style);
-    const caption = key => characters.map(c => ({char_caption:c[key] || '', centers:[{x:0.5,y:0.5}]}));
+    if (characters.length > (v5 ? 22 : 6)) throw Error('独立角色提示词超过当前模型的上限。');
+    const useCoords = !!plan.shot && characters.length > 1 && plan.characters.some(role => role.side === 'left' || role.side === 'right');
+    const centers = characters.map((_,index) => ({x:useCoords ? ({left:0.3,right:0.7}[plan.characters[index]?.side] ?? 0.5) : 0.5,y:0.5}));
+    const caption = key => characters.map((c,index) => ({char_caption:c[key] || '', centers:[centers[index]]}));
     return {model, input, action:'generate', parameters:{
         params_version:v5 ? 4 : 3, width:draw.width, height:draw.height, steps:draw.steps, scale:draw.scale,
         sampler:draw.sampler, noise_schedule:'karras', n_samples:1, seed:draw.seed ?? crypto.getRandomValues(new Uint32Array(1))[0],
-        image_format:'png', qualityToggle:!!options.quality, cfg_rescale:draw.rescale, negative_prompt:negative, use_coords:false,
+        image_format:'png', qualityToggle:!!options.quality, cfg_rescale:draw.rescale, negative_prompt:negative, use_coords:useCoords,
         dynamic_thresholding:false, prefer_brownian:true, deliberate_euler_ancestral_bug:false,
-        ...(v5 ? {straight_alpha:true} : {}), characterPrompts:characters.map(c => ({prompt:c.positive, uc:c.negative || '', center:{x:0.5,y:0.5}})),
-        v4_prompt:{caption:{base_caption:input, char_captions:caption('positive')}, use_coords:false, use_order:true},
+        ...(v5 ? {straight_alpha:true} : {}), characterPrompts:characters.map((c,index) => ({prompt:c.positive, uc:c.negative || '', center:centers[index]})),
+        v4_prompt:{caption:{base_caption:input, char_captions:caption('positive')}, use_coords:useCoords, use_order:true},
         v4_negative_prompt:{caption:{base_caption:negative,char_captions:caption('negative')},legacy_uc:false}
     }};
 }
@@ -179,36 +197,59 @@ export function makeImageBody(connection, plan, style, options) {
         ...(connection.otherReply === 'b64_json' && !isGptImageModel(model) ? {response_format:'b64_json'} : {})};
 }
 
-export function supportsIdentityImages(connection) {
+export function identityImageLimit(connection, roleCount) {
     const {imageProtocol, imageModel} = connection;
-    return imageProtocol === 'grok' || imageProtocol === 'gemini' ||
-        imageProtocol === 'openai' && isGptImageModel(imageModel);
+    if (imageProtocol === 'nai') {
+        return connection.imageProvider === 'official' && connection.naiReference?.enabled && roleCount === 1 ? 1 : 0;
+    }
+    if (imageProtocol === 'grok') return imageModel === 'grok-imagine-image-2.0' ? 3 : 1;
+    if (imageProtocol === 'gemini') return /flash-lite|^gemini-2\.5/.test(imageModel) ? 1 : 3;
+    return imageProtocol === 'openai' && isGptImageModel(imageModel) ? 3 : 0;
+}
+
+function referenceDirections(protocol, references) {
+    const mapping = references.map((ref,index) => 'image ' + (index+1) + ' depicts subject ' + ref.subject).join('; ');
+    const controls = {
+        openai:'Create a fresh image from the scene. Retain facial identity, eye color and hairstyle from each assigned input. Preserve scene-specific action, wardrobe, proportions and framing.',
+        gemini:'Bind each image to the numbered subject only. Keep that subject visually consistent from the new camera view. Draw the clothes and pose described in the scene.',
+        grok:'Follow the numbered input mapping and the stated left/right/depth layout. Keep identities distinct and show each subject doing their own action, in the scene wardrobe.'
+    };
+    return '\n\nCharacter reference images: ' + mapping + '. ' + controls[protocol] +
+        ' Follow the opening art direction throughout. Use the inputs solely to preserve character identity.';
 }
 
 export function makeImageRequest(connection, plan, style, options, references = []) {
     const body = makeImageBody(connection,plan,style,options);
     const protocol = connection.imageProtocol || 'nai';
     let path = IMAGE_PATHS[protocol];
+    if (protocol === 'nai' && connection.imageProvider === 'official') {
+        path = '/ai/generate-image-stream';
+        body.parameters.stream = 'msgpack';
+    }
     let prompt = body.prompt ?? body.input;
-    if (!references.length || !supportsIdentityImages(connection)) return {body,path,prompt,model:body.model};
-    prompt += '\n\nCharacter reference images: ' + references.map((ref,index) =>
-        'image ' + (index+1) + ' depicts subject ' + ref.subject).join('; ') +
-        '. Use these images for recognizable physical identity. Follow the scene for current outfit, actions, composition and setting. Keep the opening art direction for the entire image.';
+    const inputs = references.slice(0,identityImageLimit(connection,plan.characters.length));
+    if (!inputs.length) return {body,path,prompt,model:body.model};
+    if (protocol === 'nai') {
+        Object.assign(body.parameters,preciseReferenceParameters(inputs[0].naiData,connection.naiReference,naiFormat(connection) === MODELS[1]));
+        return {body,path,prompt,model:body.model};
+    }
+    prompt += referenceDirections(protocol,inputs);
     if (protocol === 'gemini') {
-        const input = [{type:'text', text:prompt}, ...references.map(({image}) => ({
-            type:'image',mime_type:image.type,data:image.data
-        }))];
+        const input = [{type:'text', text:prompt}, ...inputs.flatMap(({image,subject}) => [
+            {type:'image',mime_type:image.type,data:image.data},
+            {type:'text',text:'The preceding image is an identity reference for subject ' + subject + '.'}
+        ])];
         return {path,prompt,model:body.model,body:{...body,input}};
     }
     path = '/images/edits';
     if (protocol === 'grok') {
-        const inputs = references.map(({image}) => ({type:'image_url',url:'data:' + image.type + ';base64,' + image.data}));
+        const images = inputs.map(({image}) => ({type:'image_url',url:'data:' + image.type + ';base64,' + image.data}));
         return {path,prompt,model:body.model,body:{...body,prompt,
-            ...(inputs.length === 1 ? {image:inputs[0]} : {images:inputs})}};
+            ...(images.length === 1 ? {image:images[0]} : {images})}};
     }
     const form = new FormData();
     for (const [field,value] of Object.entries({...body,prompt})) form.set(field,String(value));
-    for (const {image} of references) form.append('image[]',image.blob,'reference.jpg');
+    for (const {image} of inputs) form.append('image[]',image.blob,'reference.jpg');
     return {path,prompt,model:body.model,body:form};
 }
 
@@ -251,7 +292,7 @@ export function generate(config, key, requestData, signal, onReceiving) {
         {body:requestData,path:IMAGE_PATHS[protocol],model:requestData.model};
     const base = config.imageBase || config.naiBase;
     const previousPath = IMAGE_PATHS[protocol];
-    const address = path === previousPath ? base : base.trim().replace(/\/images\/generations\/?$/, '');
+    const address = path === previousPath ? base : base.trim().replace(/\/(?:images\/generations|ai\/generate-image)\/?$/, '');
     return request(endpoint(address,path), key, body, signal, async (r, requestSignal) => {
         onReceiving();
         const bytes = await imageResponseBytes(r,MAX_RESPONSE_BYTES,requestSignal,

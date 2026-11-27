@@ -2,14 +2,16 @@ export function pictureLibrary(host, name) {
     let database;
     function openDatabase() {
         database ??= new Promise((resolve, reject) => {
-            const request = host.indexedDB.open(name, 3);
+            const request = host.indexedDB.open(name, 4);
             request.onupgradeneeded = () => {
                 const db = request.result;
                 if (!db.objectStoreNames.contains('images')) db.createObjectStore('images');
                 if (!db.objectStoreNames.contains('gallery')) {
                     db.createObjectStore('gallery', {keyPath:'id'}).createIndex('bySource', ['source', 'date', 'id']);
                 }
-                db.createObjectStore('identityImages');
+                for (const name of ['identityImages','comics','comicArt']) {
+                    if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+                }
             };
             request.onsuccess = () => {
                 const db = request.result;
@@ -31,7 +33,44 @@ export function pictureLibrary(host, name) {
             transaction.onabort = () => reject(transaction.error ?? Error('本机图库操作失败。'));
         });
     }
+    const getRecord = (storeName,key) => operation(storeName,'readonly',(store,result) => {
+        const request = store.get(key);
+        request.onsuccess = () => result(request.result);
+    });
+    const imageIds = comic => new Set((comic?.panels ?? []).flatMap(panel => [panel.imageId,panel.previousImageId]).filter(Boolean));
+    async function commitComic(key,record,revision,images) {
+        const db = await openDatabase();
+        return new Promise((resolve,reject) => {
+            const transaction = db.transaction(['comics','comicArt'],'readwrite');
+            const comics = transaction.objectStore('comics'), art = transaction.objectStore('comicArt');
+            const read = comics.get(key);
+            const next = {...record,revision:revision+1};
+            let conflict = false;
+            read.onsuccess = () => {
+                const current = read.result;
+                if ((current?.revision ?? 0) !== revision) {
+                    conflict = true;
+                    transaction.abort();
+                    return;
+                }
+                const keep = imageIds(next);
+                for (const id of imageIds(current)) if (!keep.has(id)) art.delete(id);
+                for (const [id,blob] of images) if (keep.has(id)) art.put(blob,id);
+                comics.put(next,key);
+            };
+            transaction.oncomplete = () => resolve(next);
+            transaction.onabort = () => {
+                const error = conflict ? Error('此分镜已在另一个窗口修改。重新打开漫画可读取最新版。') :
+                    transaction.error ?? Error('本机漫画保存失败。');
+                if (conflict) error.comicConflict = true;
+                reject(error);
+            };
+        });
+    }
     return {
+        getComic: key => getRecord('comics',key),
+        getComicArt: id => getRecord('comicArt',id),
+        commitComic,
         async list(source) {
             const rows = await operation('gallery', 'readonly', (store, result) => {
                 const matches = [];

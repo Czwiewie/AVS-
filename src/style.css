@@ -64,10 +64,10 @@
 #avs-illustration-studio h3 { font-size: 1rem; }
 #avs-illustration-studio h4 { font-size: .96rem; }
 #avs-illustration-studio .studio-nav {
-    display: grid; grid-template-columns: repeat(2,minmax(0,1fr)) minmax(0,1.7fr) repeat(3,minmax(0,1fr)); padding: 6px 12px; gap: 5px;
+    display: grid; grid-template-columns: repeat(3,minmax(0,1fr)) minmax(0,1.5fr) repeat(3,minmax(0,1fr)); padding: 6px 8px; gap: 2px;
     background: #fff; border-bottom: 1px solid var(--academy-edge);
 }
-#avs-illustration-studio .studio-nav button[data-tab] { background: transparent; border-color: transparent; padding-inline: 2px; white-space: nowrap; font-size: .88rem; }
+#avs-illustration-studio .studio-nav button[data-tab] { background: transparent; border-color: transparent; padding-inline: 2px; white-space: nowrap; font-size: clamp(.76rem, 3.55vw, .88rem); }
 #avs-illustration-studio .studio-nav button[data-tab][aria-pressed=true] { color: var(--academy-blue); background: #e0f1ff; box-shadow: inset 0 -3px 0 #50b6ed; font-weight: 730; }
 #avs-illustration-studio .studio-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px; }
 #avs-illustration-studio :is(section, label, figure, .studio-stack) { display: grid; gap: 8px; min-width: 0; }
@@ -628,4 +628,17 @@ dialog.avs-q-modal :is(.q-actions,.t-actions) {
 #avs-illustration-studio .studio-passage-list button[aria-pressed="true"] {
     border-color: var(--academy-highlight);
     background: var(--academy-selected);
+}
+
+#avs-illustration-studio .studio-comic-canvas {
+    display: block;
+    width: 100%;
+    max-width: 35rem;
+    height: auto;
+    justify-self: center;
+    border: 1px solid var(--academy-edge);
+    border-radius: 6px;
+}
+#avs-illustration-studio [data-field="comicLetters"] textarea {
+    grid-column: 1 / -1;
 }

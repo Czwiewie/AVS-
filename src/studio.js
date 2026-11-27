@@ -1,6 +1,11 @@
+import {RECIPE_ROUTES, recipeRoute, snapshotRecipe, readRecipe, decodeRecipeFile, encodeRecipeFile, comparableRecipe} from './recipes.js';
+import {comicPanelOptions} from './comics.js';
+import {createComicView} from './comic-view.js';
+import {SHOT_FIELDS, SHOT_ROLE_FIELDS, SHOT_ACTION_FIELDS, SHOT_SIDES, SHOT_DEPTHS, normalizeShot} from './shots.js';
+import {NAI_REFERENCE_DEFAULTS, prepareNaiPortrait} from './nai-reference.js';
 import {archiveScope, publicSource, suggestedIdentity} from './identity.js';
 import {sourceAt, prose, optionalLooks, priorContext, archivePeople, passageRanges, withPassage} from './scene.js';
-import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, isGptImageModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageRequest, supportsIdentityImages, availableModels} from './api.js';
+import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, isGptImageModel, endpoint, extractStyle, planScene, planComic, generate, drawOptions, compileImagePrompt, makeImageRequest, identityImageLimit, availableModels} from './api.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 import {pictureLibrary} from './library.js';
 import {createAcademyFeedback} from './theme.js';
@@ -9,7 +14,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.11';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.13';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -60,6 +65,7 @@ export function installStudio(host, owner, kind, css) {
     let dialog, observer, entry, job, phase, activePage = 'draw', disposed = false, refreshVersion = 0;
     let previewUrl, historyUrl, detail, previewRow, rows = [], draftAnchor = null;
     let pickedPassage, pickingSource, retrySource, passageStart = -1;
+    let lastNaiPortrait, draftStyle;
     const thumbnailUrls = [];
     const roleBindings = new WeakMap();
     let identityRequest = 0, identityPreview = 0, identityPeople = [], identityScope = '', suggested = null;
@@ -68,10 +74,17 @@ export function installStudio(host, owner, kind, css) {
     const checked = key => field(key).checked;
     const settings = () => (context().extensionSettings[id] ??= {...defaults});
     const save = () => context().saveSettingsDebounced();
-    const setStatus = (message, level = 'info') => {
+    const comicView = createComicView({
+        host,field,library:pictures,uniqueId,
+        isActive:() => dialog?.open && activePage === 'comic' && !disposed,
+        busy:() => !!job,sceneSelection,matches,requestPlan:compileComic,renderImage:drawComicPanel,
+        generationOptions:comicGenerationOptions,run,stage,status:setStatus,
+        confirm:feedback.confirm,download:downloadBlob
+    });
+    function setStatus(message, level = 'info') {
         field('status').textContent = message;
         field('status').dataset.level = level;
-    };
+    }
     function context() {
         const current = host.SillyTavern?.getContext?.();
         if (!current) throw Error('酒馆页面尚未就绪，请等待聊天加载。');
@@ -189,6 +202,9 @@ export function installStudio(host, owner, kind, css) {
         }
         field('canvasRow').hidden = !nai;
         field('seedRow').hidden = !nai;
+        field('naiReferencePanel').hidden = other;
+        field('naiReference45').hidden = selected !== MODELS[0];
+        field('naiReference5').hidden = selected !== MODELS[1];
         for (const detail of dialog.querySelectorAll('[data-nai-only]')) detail.hidden = !nai;
         field('otherDraw').hidden = !other;
         field('otherDraw').textContent = other
@@ -197,6 +213,7 @@ export function installStudio(host, owner, kind, css) {
                     (generic ? ' · 画幅：' + (text('otherSize') === 'auto' ? '自动' : text('otherSize')) : ''))
             : '';
         drawLabels();
+        syncRecipes();
     }
     function readConnections({vision = false, image = false, persist = false} = {}) {
         const stored = settings();
@@ -230,6 +247,7 @@ export function installStudio(host, owner, kind, css) {
             save();
         }
         connection.naiModel = selectedNaiModel();
+        connection.naiReference = readNaiReference();
         return connection;
     }
     async function chooseVisionPreset() {
@@ -253,6 +271,16 @@ export function installStudio(host, owner, kind, css) {
         return saved.styles;
     }
     function activeStyle() { return savedStyles().find(style => style.id === settings().selectedStyle); }
+    const activeRecipeRoute = () => recipeRoute({imageProtocol:currentProtocol(),imageProvider:text('imageProvider')});
+    function drawingStyle() {
+        const accents = settings().recipeAccents ?? {};
+        const route = activeRecipeRoute();
+        return Object.hasOwn(accents,route) ? accents[route] : activeStyle();
+    }
+    function clearRecipeStyle() {
+        const saved = settings();
+        if (saved.recipeAccents) delete saved.recipeAccents[activeRecipeRoute()];
+    }
     function populateStyles() {
         const styles = savedStyles(), selected = activeStyle();
         const options = [new Option('不使用附加参考',''), ...styles.map(style => new Option(style.name, style.id))];
@@ -264,7 +292,8 @@ export function installStudio(host, owner, kind, css) {
         field('styleUpdate').disabled = !selected || !!job;
         field('styleRemove').disabled = !selected || !!job;
         for (const key of STYLE_FIELDS) field('style-' + key).value = selected?.[key] || '';
-        field('styleLink').textContent = selected ? '画风 · ' + selected.name : '选择或上传画风';
+        const effective = drawingStyle();
+        field('styleLink').textContent = effective ? '画风 · ' + effective.name : '选择或上传画风';
     }
     function addStyle(style, replace) {
         const saved = settings(), list = savedStyles();
@@ -310,6 +339,97 @@ export function installStudio(host, owner, kind, css) {
         settings().naiModel = text('naiModel');
         save();
     }
+    const expertRecipes = () => settings().expertRecipes ?? [];
+    const currentRecipe = () => expertRecipes().find(recipe => recipe.id === text('recipeList') && recipe.route === activeRecipeRoute());
+    function describeRecipe() {
+        const recipe = currentRecipe();
+        const route = activeRecipeRoute();
+        const connection = readConnections();
+        field('recipeRoute').textContent = RECIPE_ROUTES[route] + ' · ' + (modelLabel(connection.imageModel) || '请选择生图模型');
+        if (recipe) {
+            const {draw,aspect,resolution,size,precise} = recipe.config;
+            const summary = draw ? [draw.width+'×'+draw.height,'步数 '+draw.steps,SAMPLERS[draw.sampler],'引导 '+draw.scale,
+                draw.seed == null ? '' : '种子 '+draw.seed,precise?.enabled ? '单人精确参考' : '']
+                : [aspect || size,resolution,recipe.config.quality ? '画质 '+recipe.config.quality : ''];
+            field('recipeSummary').textContent = [modelLabel(recipe.model),...summary,recipe.style?.name].filter(Boolean).join(' · ');
+        } else field('recipeSummary').textContent = '';
+        for (const name of ['recipeApply','recipeExport','recipeDelete']) field(name).disabled = !!job || !recipe;
+        if (activePage === 'gallery') field('recipeCompare').hidden = !comparableRecipe(detail,connection);
+    }
+    function syncRecipes(id = text('recipeList')) {
+        const route = activeRecipeRoute();
+        const list = expertRecipes().filter(recipe=>recipe.route===route);
+        field('recipeList').replaceChildren(...(list.length ? list.map(recipe=>new Option(recipe.name,recipe.id)) :
+            [new Option('暂无配方','')]));
+        field('recipeList').value = list.find(recipe=>recipe.id===id)?.id ?? list[0]?.id ?? '';
+        describeRecipe();
+    }
+    function saveExpertRecipe(data) {
+        const saved = settings(), list = expertRecipes();
+        if (list.length >= 64) throw Error('最多可保存 64 套专家配方。');
+        const row = {...data,id:uniqueId()};
+        saved.expertRecipes = [...list,row];
+        save();
+        syncRecipes(row.id);
+        return row;
+    }
+    function createExpertRecipe() {
+        const connection = readConnections();
+        const row = saveExpertRecipe(snapshotRecipe(text('recipeName'),connection,connection.imageProtocol === 'nai' ? readDraw() : undefined,
+            checked('recipeWithStyle') ? drawingStyle() : null));
+        field('recipeName').value = '';
+        setStatus('已保存配方「'+row.name+'」。','success');
+    }
+    function applyExpertRecipe() {
+        const chosen = currentRecipe();
+        if (!chosen) return;
+        const row = readRecipe(chosen), cfg = row.config, saved = settings();
+        const p = currentProtocol();
+        const applied = {};
+        if (p === 'nai') {
+            field('naiModel').value = cfg.format;
+            if (row.route === 'nai-compatible') applied.otherModel = row.model;
+            setDraw({...cfg.draw,count:Number(text('count')) || 1});
+            field('naiReferenceEnabled').checked = cfg.precise.enabled;
+            for (const [key,input] of Object.entries(naiRefInputs)) field(input).value = cfg.precise[key];
+            saved.naiReference = readNaiReference();
+        } else if (nativeProtocols.includes(p)) {
+            field(p+'Model').value = row.model;
+            syncImageFields();
+            Object.assign(applied,{[p+'Model']:row.model,[p+'Aspect']:cfg.aspect,[p+'Resolution']:cfg.resolution});
+            if (p==='grok') applied.grokQuality = cfg.quality ?? 'auto';
+        } else {
+            Object.assign(applied,{otherModel:row.model,otherSize:cfg.size,otherReply:cfg.reply});
+        }
+        for (const [key,value] of Object.entries(applied)) {
+            field(key).value = value;
+            saved[key] = value;
+        }
+        (saved.recipeAccents ??= {})[row.route] = row.style;
+        draftStyle = undefined;
+        field('applyStyle').checked = true;
+        if (p === 'nai') saveDraw();
+        else save();
+        syncImageFields();
+        populateStyles();
+        setStatus('已应用「'+row.name+'」。','success');
+    }
+    async function removeExpertRecipe() {
+        const recipe = currentRecipe();
+        if (!recipe || !await feedback.confirm('删除「'+recipe.name+'」？',{title:'删除专家配方',accept:'删除',danger:true})) return;
+        settings().expertRecipes = expertRecipes().filter(row=>row.id!==recipe.id);
+        save();
+        syncRecipes();
+        setStatus('已删除配方。');
+    }
+    function downloadBlob(blob,filename) {
+        const link = document.createElement('a'), url = URL.createObjectURL(blob);
+        link.href = url; link.download = filename;
+        document.body.append(link);
+        try { link.click(); }
+        finally { link.remove(); host.setTimeout(()=>URL.revokeObjectURL(url),20000); }
+    }
+
     function drawingPresets() {
         return [...builtInPresets, ...(settings().drawingPresets ?? [])];
     }
@@ -382,7 +502,7 @@ export function installStudio(host, owner, kind, css) {
         field('clearPassage').hidden = !passage;
         field('make').textContent = manual ? '按手写提示词生成' : passage ? '画这一段' :
             text('floor') === 'latest' ? '一键画当前回复' : '一键画所选楼层';
-        field('retryDrawing').hidden = !retrySource || !isSelected(retrySource);
+        field('retryDrawing').hidden = activePage === 'comic' || !retrySource || !isSelected(retrySource);
     }
     function closePassagePicker() {
         pickingSource = null;
@@ -533,6 +653,7 @@ export function installStudio(host, owner, kind, css) {
         paintPreview(row, true);
         field('reuse').hidden = !row?.plan;
         field('redrawHistory').hidden = !row?.plan;
+        field('recipeCompare').hidden = !comparableRecipe(row,readConnections());
         field('removeImage').hidden = !row?.id;
         const box = field('metadataBox');
         box.hidden = !row?.plan;
@@ -546,7 +667,14 @@ export function installStudio(host, owner, kind, css) {
             ['引导强度',row.draw.scale], ['CFG Rescale',row.draw.rescale],
             ['自动质量标签',row.draw.quality ? '开启' : '关闭']
         ];
-        if (row.identityImages?.length) params.push(['人物参考图',row.identityImages.join('、')]);
+        if (row.recipeComparison) params.push(['出图方式','原镜头 · 当前参数对照']);
+        if (row.identityImages?.length) params.push([row.naiReference ? 'NAI 精确角色参考' : '人物参考图',row.identityImages.join('、')]);
+        if (row.naiReference) params.push(['精确参考强度',row.model === MODELS[1] ?
+            row.naiReference.strength5 : row.naiReference.strength45]);
+        if (row.naiReference && row.model === MODELS[0]) params.push(['精确参考保真度',row.naiReference.fidelity45]);
+        if (row.requestPlan?.shot) {
+            params.push(...Object.entries(SHOT_FIELDS).map(([key,label]) => [label,row.requestPlan.shot[key]]).filter(([,value]) => value));
+        }
         const cells = params.flatMap(([label, value]) => {
             const name = document.createElement('dt'), cell = document.createElement('dd');
             name.textContent = label;
@@ -584,7 +712,9 @@ export function installStudio(host, owner, kind, css) {
             if (pickingSource && !sameFloor(floor,pickingSource)) closePassagePicker();
             source = selectedSource();
             showSource(source);
+            if (activePage === 'comic') void comicView.refresh();
         } catch(error) {
+            if (activePage === 'comic') void comicView.refresh();
             closePassagePicker();
             field('passageActions').hidden = true;
             field('retryDrawing').hidden = true;
@@ -599,6 +729,7 @@ export function installStudio(host, owner, kind, css) {
         paintPreview(rows[0]); renderHistory();
     }
     function go(page) {
+        const enteringComic = page === 'comic' && activePage !== 'comic';
         activePage = page;
         for (const element of dialog.querySelectorAll('[data-page]')) element.hidden = element.dataset.page !== page;
         for (const button of dialog.querySelectorAll('[data-tab]')) button.setAttribute('aria-pressed', String(button.dataset.tab === page));
@@ -606,6 +737,9 @@ export function installStudio(host, owner, kind, css) {
         if (page === 'gallery') renderHistory();
         if (page !== 'draw') closePassagePicker();
         if (page === 'identity') void refreshIdentities();
+        field('make').hidden = page === 'comic';
+        field('retryDrawing').hidden = page === 'comic' || !retrySource || !isSelected(retrySource);
+        if (page === 'comic') void comicView.refresh(enteringComic);
         if (page !== 'gallery') { clearThumbnails(); if (historyUrl) paintPreview(null,true); }
     }
 
@@ -760,18 +894,74 @@ export function installStudio(host, owner, kind, css) {
         if (scope === archiveScope(context())) await showIdentity();
         setStatus('已移除人物参考图。');
     }
-    async function identityImages(plan, connection, scope) {
-        if (!supportsIdentityImages(connection)) return [];
-        const chosen = plan.characters.map((role,index) => ({role,index})).filter(({role}) => role.imageToken).slice(0,3);
+    const naiRefInputs = {strength45:'naiStrength45', fidelity45:'naiFidelity45', strength5:'naiStrength5'};
+    function readNaiReference() {
+        return {enabled:checked('naiReferenceEnabled'),...Object.fromEntries(Object.entries(naiRefInputs)
+            .map(([key,input]) => [key,text(input) || NAI_REFERENCE_DEFAULTS[key]]))};
+    }
+    async function identityImages(plan, connection, scope, signal) {
+        const limit = identityImageLimit(connection,plan.characters.length);
+        if (!limit) return [];
+        const chosen = plan.characters.map((role,index) => ({role,index})).filter(({role}) => role.imageToken).slice(0,limit);
         return Promise.all(chosen.map(async ({role,index}) => {
             const current = readBindings(scope)[role.archiveId];
             const image = await pictures.getIdentityImage(imageKey(scope,role.archiveId));
             if (current?.type !== 'fan' || current.imageToken !== role.imageToken || image?.token !== role.imageToken) {
                 throw Error('「' + role.label + '」的人物参考图已变更，请重新提取草稿，或在人物分栏取消发送参考图。');
             }
-            return {subject:index+1, name:role.label, image};
+            signal.throwIfAborted();
+            const reference = {subject:index+1, name:role.label, image};
+            if (connection.imageProtocol === 'nai') {
+                stage('准备 NAI 精确角色参考');
+                const v5 = connection.imageModel === MODELS[1];
+                if (lastNaiPortrait?.token !== image.token || lastNaiPortrait.v5 !== v5) {
+                    lastNaiPortrait = {token:image.token,v5,data:await prepareNaiPortrait(host,image.blob,v5)};
+                }
+                reference.naiData = lastNaiPortrait.data;
+            }
+            return reference;
         }));
     }
+    function addShotControl(container,label,key,value,options) {
+        const wrapper = document.createElement('label');
+        wrapper.textContent = label;
+        const input = document.createElement(options ? 'select' : 'input');
+        input.dataset.shotValue = key;
+        input.dataset.lock = '';
+        input.disabled = !!job;
+        if (options) input.replaceChildren(...Object.entries(options).map(([id,title]) => new Option(title,id)));
+        else input.maxLength = 280;
+        input.value = value ?? '';
+        wrapper.append(input);
+        container.append(wrapper);
+    }
+    function showShot(plan) {
+        const box = field('shotDetails'), fields = field('shotFields'), actions = field('shotActions');
+        box.hidden = !plan.shot;
+        fields.replaceChildren(); actions.replaceChildren();
+        field('positiveLabel').textContent = plan.shot ? '场景与人数' : '正面提示词';
+        if (!plan.shot) return;
+        for (const [key,label] of Object.entries(SHOT_FIELDS)) addShotControl(fields,label,key,plan.shot[key]);
+        const names = Object.fromEntries(plan.characters.map((role,index) =>
+            [role.id, role.label ? '人物 ' + (index+1) + ' · ' + role.label : '人物 ' + (index+1)]));
+        for (const [index,relation] of (plan.interactions ?? []).entries()) {
+            const row = document.createElement('fieldset'), title = document.createElement('legend');
+            row.className = 'studio-card studio-grid';
+            title.textContent = '互动 ' + (index+1);
+            row.append(title);
+            addShotControl(row,'发起者','actor',relation.actor,names);
+            addShotControl(row,'对象','target',relation.target,{'':'无指定对象',...names});
+            addShotControl(row,'道具当前所在','holder',relation.holder,{'':'未明确',scene:'场景中',...names});
+            for (const [key,label] of Object.entries(SHOT_ACTION_FIELDS)) addShotControl(row,label,key,relation[key]);
+            const remove = document.createElement('button');
+            remove.type = 'button'; remove.textContent = '移除这条互动'; remove.dataset.lock = ''; remove.disabled = !!job;
+            remove.onclick = () => row.remove();
+            row.append(remove);
+            actions.append(row);
+        }
+    }
+    const shotInputs = container => Object.fromEntries(Array.from(container.querySelectorAll('[data-shot-value]'),
+        input => [input.dataset.shotValue,input.value.trim()]));
 
     function addRole(role = {}) {
         const count = field('roles').children.length, limit = currentProtocol() === 'nai' && selectedNaiModel() === MODELS[0] ? 6 : 22;
@@ -790,19 +980,37 @@ export function installStudio(host, owner, kind, css) {
             label.append(check,'发送人物参考图（支持的线路）');
             card.append(label);
         }
-        if (role.identity) roleBindings.set(card,role);
-        card.querySelector('button').onclick = () => card.remove();
+        if (role.id) {
+            const details = document.createElement('details'), summary = document.createElement('summary');
+            details.className = 'studio-card studio-stack';
+            summary.textContent = '站位、穿搭和动作';
+            details.append(summary);
+            addShotControl(details,'左右位置','side',role.side,SHOT_SIDES);
+            addShotControl(details,'前后景','depth',role.depth,SHOT_DEPTHS);
+            for (const [key,label] of Object.entries(SHOT_ROLE_FIELDS)) addShotControl(details,label,key,role[key]);
+            card.prepend(details);
+        }
+        roleBindings.set(card,role);
+        card.querySelector('button').onclick = () => {
+            card.remove();
+            for (const row of field('shotActions').children) {
+                const values = shotInputs(row);
+                if (values.actor === role.id || values.target === role.id || values.holder === role.id) row.hidden = true;
+            }
+        };
         field('roles').append(card);
         if (job) for (const node of card.querySelectorAll('[data-lock]')) node.disabled = true;
     }
-    function setDraft(plan, source = null, applyStyle = true) {
+    function setDraft(plan, source = null, applyStyle = true, savedStyle) {
         draftAnchor = source;
+        draftStyle = savedStyle;
         retrySource = null;
         field('retryDrawing').hidden = true;
         field('positive').value = plan.base;
         field('negative').value = plan.negative || '';
         field('roles').replaceChildren();
         for (const role of plan.characters) addRole(role);
+        showShot(plan);
         field('applyStyle').checked = applyStyle;
         const confirmed = plan.characters.filter(role => role.label).map(role => role.label);
         field('draftIdentities').hidden = !confirmed.length;
@@ -815,14 +1023,28 @@ export function installStudio(host, owner, kind, css) {
             const role = roleBindings.get(card);
             return {positive:card.querySelector('[data-role="positive"]').value.trim(),
                 negative:card.querySelector('[data-role="negative"]').value.trim(),
-                archiveId:role?.archiveId, label:role?.label,
-                imageToken:card.querySelector('[data-role="image"]')?.checked ? role?.identity.imageToken : undefined};
+                archiveId:role?.archiveId, label:role?.label, id:role?.id, ...shotInputs(card),
+                drawIdentity:role?.drawIdentity, appearanceChanged:role?.appearanceChanged,
+                imageToken:card.querySelector('[data-role="image"]')?.checked ? role?.identity?.imageToken : undefined};
         }).filter(role => role.positive || role.negative);
         if (characters.some(role => !role.positive)) throw Error('有人物分栏只填了负面词，请补上人物正面词。');
-        return {base:text('positive'), negative:text('negative'), characters};
+        const draft = {base:text('positive'),negative:text('negative'),characters};
+        if (field('shotDetails').hidden) return draft;
+        const ids = new Set(characters.map(role => role.id).filter(Boolean));
+        let number = 1;
+        for (const role of characters) {
+            if (role.id) continue;
+            while (ids.has('p' + number)) number++;
+            role.id = 'p' + number;
+            ids.add(role.id);
+        }
+        const shot = shotInputs(field('shotFields'));
+        const interactions = Array.from(field('shotActions').children).filter(row => !row.hidden).map(shotInputs);
+        return {...draft,...normalizeShot({shot,interactions,characters},characters)};
     }
+    const chosenArtStyle = () => checked('applyStyle') ? draftStyle ?? drawingStyle() : null;
     async function copyPrompt() {
-        const draft = getDraft(), style = checked('applyStyle') ? activeStyle() : null;
+        const draft = getDraft(), style = chosenArtStyle();
         const protocol = currentProtocol(), compiled = compileImagePrompt(protocol,draft,style);
         const value = protocol === 'nai' ? JSON.stringify(compiled,null,2) : compiled.base;
         if (host.navigator.clipboard?.writeText) await host.navigator.clipboard.writeText(value);
@@ -858,9 +1080,16 @@ export function installStudio(host, owner, kind, css) {
             }
         }
         field('naiModel').value = knownNaiModel(detail.naiModel) ?? knownNaiModel(model) ?? MODELS[0];
+        if ((detail.imageProtocol || 'nai') === 'nai') {
+            field('naiReferenceEnabled').checked = !!detail.naiReference?.enabled;
+            for (const [key,input] of Object.entries(naiRefInputs)) field(input).value = detail.naiReference?.[key] ?? NAI_REFERENCE_DEFAULTS[key];
+        }
         setDraw({...draw, seed, count:1}); saveDraw();
         syncImageFields();
-        setDraft(plan, source.index === null ? null : source, false);
+        const editable = detail.requestPlan?.shot ? {...detail.requestPlan,
+            characters:detail.requestPlan.characters.map(role => ({...role,
+                identity:role.imageToken ? {imageToken:role.imageToken} : null,useReferenceImage:!!role.imageToken}))} : plan;
+        setDraft(editable,source.index === null ? null : source,!!(editable.shot && detail.requestStyle),detail.requestStyle);
         go('prompts');
         setStatus('已载入当时的提示词、参数与种子。');
     }
@@ -895,6 +1124,8 @@ export function installStudio(host, owner, kind, css) {
             field('styleUpdate').disabled = !activeStyle();
             field('presetDelete').disabled = builtInPresets.some(preset => preset.id === text('drawPreset'));
             syncIdentityForm();
+            describeRecipe();
+            comicView.availability();
         }
     }
     async function run(action) {
@@ -997,12 +1228,46 @@ export function installStudio(host, owner, kind, css) {
         endpoint(imageBase,IMAGE_PATHS[imageProtocol]);
         return {...connection,imageProtocol,imageProvider,imageBase,imageKey:connection[kind + 'Key'],imageModel:record.model,
             naiModel:record.naiModel || knownNaiModel(record.model) || connection.naiModel,otherSize:record.otherSize,
-            otherReply:record.otherReply,
+            otherReply:record.otherReply,naiReference:record.naiReference,
             [imageProtocol + 'Aspect']:record.nativeOptions?.aspect,
             [imageProtocol + 'Resolution']:record.nativeOptions?.resolution,
             ...(imageProtocol === 'grok' ? {grokQuality:record.nativeOptions?.quality ?? 'auto'} : {})};
     }
-    async function illustrate(signal, edited = false, previous = null) {
+    function validateImageConnection(connection) {
+        if (connection.imageProvider === 'official' && !connection.imageKey) throw Error('请在「连接」中填写 NovelAI Token。');
+        const provider = NATIVE_IMAGE_PROVIDERS[connection.imageProtocol];
+        if (provider && !connection.imageKey) throw Error('请在「连接」中填写 ' + provider.label + ' 的 API Key。');
+        if (!connection.imageModel) throw Error('请在「连接」选择或填写生图模型。');
+    }
+    async function compileComic(source,spec,signal) {
+        const connection = readConnections({vision:true});
+        if (!connection.visionModel || !connection.visionKey) throw Error('请在「连接」中填写视觉模型与密钥。');
+        const input = source.passage ? source : withPassage(source,{start:0,end:source.visualText.length,text:source.visualText});
+        stage('读取第 '+source.index+' 楼的故事与角色资料');
+        const scope = archiveScope(context());
+        const looks = await optionalLooks(host.__AVS_V4_BRIDGE__,input,readBindings(scope),checked('useArchive'));
+        signal.throwIfAborted();
+        if (!matches(source)) throw Error('原楼层已变更。');
+        stage('规划 '+spec.count+' 格漫画');
+        const plan = await planComic(connection,connection.visionKey,input,looks,spec,signal);
+        if (!matches(source)) throw Error('原楼层已变更。');
+        return plan;
+    }
+    function comicGenerationOptions() {
+        const connection = readConnections({image:true});
+        validateImageConnection(connection);
+        return {connection,draw:readDraw(),style:drawingStyle(),scope:archiveScope(context())};
+    }
+    async function drawComicPanel(panel,cell,index,options,signal) {
+        const {connection,draw} = comicPanelOptions(options.connection,options.draw,cell,index);
+        const plan = {...panel.scene,base:panel.scene.base+', single text-free comic panel',
+            negative:[panel.scene.negative,'text, lettering, speech bubbles, panel borders'].filter(Boolean).join(', ')};
+        const references = await identityImages(plan,connection,options.scope,signal);
+        signal.throwIfAborted();
+        const request = makeImageRequest(connection,plan,options.style,draw,references);
+        return generate(connection,connection.imageKey,request,signal,()=>stage('读取第 '+(index+1)+' 格回图'));
+    }
+    async function illustrate(signal, edited = false, previous = null, recipeComparison = false) {
         let source = sceneSelection();
         if (previous) {
             if (previous.source !== source.key || previous.text !== source.text) throw Error('原回复已切换，请从原楼层的历史重画。');
@@ -1012,23 +1277,24 @@ export function installStudio(host, owner, kind, css) {
             source = previous.passage ? withPassage(source,previous.passage) : selectedFloor();
         }
         const useDraft = edited || !!previous || source.index === null;
-        const connection = previous ? redrawConnection(previous) : readConnections({vision:!useDraft, image:true});
-        const draw = previous ? {...previous.draw,seed:null,count:1} : readDraw();
-        if (connection.imageProvider === 'official' && !connection.imageKey) throw Error('请在「连接」中填写 NovelAI Token。');
+        const connection = previous && !recipeComparison ? redrawConnection(previous) : readConnections({vision:!useDraft, image:true});
+        if (recipeComparison && !comparableRecipe(previous,connection)) throw Error('对照需要与原图相同的生图线路和模型。');
+        let draw = previous && !recipeComparison ? {...previous.draw,seed:null,count:1} : readDraw();
+        if (recipeComparison) draw = {...draw,seed:previous.seed ?? null,count:1};
+        validateImageConnection(connection);
         const provider = NATIVE_IMAGE_PROVIDERS[connection.imageProtocol];
-        if (provider && !connection.imageKey) throw Error('请在「连接」中填写 ' + provider.label + ' 的 API Key。');
-        if (!connection.imageModel) throw Error('请在「连接」选择或填写生图模型。');
         if (edited && draftAnchor && !isSelected(draftAnchor)) {
             throw Error('草稿来自另一条回复。请选择原楼层，或从当前楼层重新提取草稿。');
         }
-        const style = previous ? previous.requestStyle : checked('applyStyle') ? activeStyle() : null;
         if (!useDraft) setDraft(await compile(source,connection,signal),source,checked('applyStyle'));
+        const style = recipeComparison ? drawingStyle() : previous ? previous.requestStyle : chosenArtStyle();
         const plan = previous ? previous.requestPlan ?? previous.plan : getDraft();
-        const references = await identityImages(plan,connection,archiveScope(context()));
+
         if (!previous) saveDraw();
         if (isSelectedFloor(source) && activePage !== 'draw') go('draw');
         let completed = 0, storedCount = 0;
         try {
+            const references = await identityImages(plan,connection,archiveScope(context()),signal);
             for (let i=0; i<draw.count; i++) {
                 signal.throwIfAborted();
                 if (!matches(source)) throw Error('原楼层已变更，剩余图片已停止。');
@@ -1048,11 +1314,12 @@ export function installStudio(host, owner, kind, css) {
                 } : undefined;
                 const pictureId = uniqueId();
                 const row = {id:pictureId, seriesId:previous?.seriesId || previous?.id || pictureId,
-                    source:source.key, text:source.text, index:source.index, passage:source.passage, blob,
+                    source:source.key, text:source.text, index:source.index, passage:source.passage, blob,recipeComparison,
                     requestPlan:plan, requestStyle:style, date:Date.now(), model, naiModel:connection.naiModel, styleName:style?.name,
                     imageProvider:connection.imageProvider, imageProtocol:connection.imageProtocol, otherSize:connection.otherSize,
                     otherReply:body.response_format === 'b64_json' && connection.imageProtocol === 'openai' ? 'b64_json' : undefined,
-                    draw, nativeOptions, identityImages:references.map(ref => ref.name), resultSize:{width:img.naturalWidth,height:img.naturalHeight},
+                    draw, nativeOptions, naiReference:native && references.length ? connection.naiReference : undefined,
+                    identityImages:references.map(ref => ref.name), resultSize:{width:img.naturalWidth,height:img.naturalHeight},
                     seed:body.parameters?.seed,
                     plan:native ? {base:body.input, negative:body.parameters.negative_prompt,
                         characters:body.parameters.characterPrompts.map(role => ({positive:role.prompt,negative:role.uc}))} :
@@ -1126,6 +1393,12 @@ export function installStudio(host, owner, kind, css) {
         field('useVisionPreset').checked = !!stored.useVisionPreset;
         field('visionPresetRow').hidden = !checked('useVisionPreset');
         setDraw(stored.draw);
+        field('naiReferenceEnabled').checked = stored.naiReference?.enabled ?? false;
+        for (const [key,input] of Object.entries(naiRefInputs)) field(input).value = stored.naiReference?.[key] ?? NAI_REFERENCE_DEFAULTS[key];
+        for (const name of ['naiReferenceEnabled',...Object.values(naiRefInputs)]) field(name).onchange = () => {
+            settings().naiReference = readNaiReference();
+            save();
+        };
         syncImageFields();
         populateDrawPresets();
         populateStyles();
@@ -1163,6 +1436,8 @@ export function installStudio(host, owner, kind, css) {
         };
         for (const position of ['Left','Right']) field('compare' + position).onchange = () => renderComparison(position);
         field('styles').onchange = () => {
+            draftStyle = undefined;
+            clearRecipeStyle();
             settings().selectedStyle = text('styles'); save(); populateStyles();
         };
         field('identityPerson').onchange = () => showIdentity().catch(error => notify(error.message,'error'));
@@ -1186,6 +1461,25 @@ export function installStudio(host, owner, kind, css) {
         action('presetApply', applyDrawPreset);
         action('presetSave', storeDrawPreset);
         action('presetDelete', deleteDrawPreset);
+        comicView.bind();
+        field('recipeList').onchange = describeRecipe;
+        action('recipeSave',createExpertRecipe);
+        action('recipeApply',applyExpertRecipe);
+        action('recipeDelete',removeExpertRecipe);
+        action('recipeExport',() => {
+            const recipe = currentRecipe();
+            if (!recipe) return;
+            downloadBlob(new Blob([encodeRecipeFile(recipe)],{type:'application/json'}),'AVS-'+recipe.route+'-recipe.json');
+        });
+        field('recipeImport').onchange = async event => {
+            const file = event.target.files[0]; event.target.value = '';
+            if (!file) return;
+            try {
+                if (file.size > 65536) throw Error('配方文件超过读取上限。');
+                const row = saveExpertRecipe(decodeRecipeFile(await file.text()));
+                setStatus('已导入「'+row.name+'」 · '+RECIPE_ROUTES[row.route]+'。','success');
+            } catch(error) { notify(error.message,'error'); }
+        };
         action('models', () => run(signal => listModels(signal)));
         action('otherModels', () => run(signal => listModels(signal,'other')));
         action('chooseVisionPreset', chooseVisionPreset);
@@ -1197,6 +1491,7 @@ export function installStudio(host, owner, kind, css) {
         action('clearPassage', () => { pickedPassage = null; closePassagePicker(); showSource(selectedFloor()); });
         action('redrawPreview', () => run(signal => illustrate(signal,false,previewRow)));
         action('redrawHistory', () => run(signal => illustrate(signal,false,detail)));
+        action('recipeCompare', () => run(signal=>illustrate(signal,false,detail,true)));
         action('olderPreview', () => changePreviewVersion(1));
         action('newerPreview', () => changePreviewVersion(-1));
         action('drawDraft', () => run(signal => illustrate(signal,true)));

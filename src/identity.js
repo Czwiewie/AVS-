@@ -69,7 +69,11 @@ export function prepareIdentityRoles(plan, looks, source, natural) {
         role.label = person.name;
         const localChange = role.appearanceChange && visible.includes(role.appearanceChange);
         role.useReferenceImage = !localChange;
-        role.positive = identityCaption(person.identity,role.positive,natural,localChange);
+        if (plan.shot) {
+            const {name,romanName,work,features,tags} = person.identity;
+            role.drawIdentity = {name,romanName,work,features,tags};
+            role.appearanceChanged = !!localChange;
+        } else role.positive = identityCaption(person.identity,role.positive,natural,localChange);
     }
     return plan;
 }

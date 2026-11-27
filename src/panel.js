@@ -1,8 +1,9 @@
+import {COMIC_LAYOUTS} from './comics.js';
 import {MODEL_NAMES} from './api.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 
 export const STUDIO_PAGES = {
-    draw:'绘图', prompts:'提示词', identity:'角色参考', styles:'画风', gallery:'历史', settings:'连接'
+    draw:'绘图', comic:'漫画', prompts:'提示词', identity:'角色参考', styles:'画风', gallery:'历史', settings:'连接'
 };
 
 export const CANVASES = {'832x1216':'竖幅', '1216x832':'横幅', '1024x1024':'方形',
@@ -91,6 +92,33 @@ export function workshopPanel(samplers) {
           </div>
           <p class="studio-note" data-field="otherDraw" hidden></p>
         </details>
+        <details class="studio-card studio-stack">
+          <summary>专家配方</summary>
+          <p class="studio-note" data-field="recipeRoute"></p>
+          <label>本线路配方<select data-field="recipeList" data-lock></select></label>
+          <p class="studio-note" data-field="recipeSummary"></p>
+          <div class="studio-row">
+            <button type="button" data-field="recipeApply" data-lock>应用所选配方</button>
+            <button type="button" data-field="recipeExport" data-lock>导出</button>
+            <button type="button" data-field="recipeDelete" data-lock>删除</button>
+          </div>
+          <label>新配方名称<input maxlength="60" data-field="recipeName" data-lock placeholder="例如 · 青灯近景"></label>
+          <label class="studio-check"><input type="checkbox" data-field="recipeWithStyle" checked data-lock>带上当前参考色彩与辅光</label>
+          <div class="studio-row">
+            <button type="button" data-field="recipeSave" data-lock>将当前参数另存为配方</button>
+            <label class="studio-file">导入配方<input type="file" accept=".json,application/json" data-field="recipeImport" data-lock></label>
+          </div>
+        </details>
+        <details class="studio-card" data-field="naiReferencePanel" hidden>
+          <summary>NAI 精确角色参考</summary>
+          <label class="studio-check"><input type="checkbox" data-field="naiReferenceEnabled" data-lock>单人画面使用已绑定的角色参考图</label>
+          <p class="studio-note">每张使用精确参考的插画额外消耗 Anlas。设定一次后可继续一键出图。</p>
+          <div class="studio-grid" data-field="naiReference45">
+            <label>4.5 强度<input type="number" min="0.05" max="1" step="0.05" data-field="naiStrength45" data-lock></label>
+            <label>4.5 保真度<input type="number" min="0" max="1" step="0.05" data-field="naiFidelity45" data-lock></label>
+          </div>
+          <label data-field="naiReference5">5 Full 强度<input type="number" min="0.05" max="5" step="0.05" data-field="naiStrength5" data-lock></label>
+        </details>
         <details class="studio-card" data-nai-only>
           <summary>绘图预设</summary>
           <div class="studio-row">
@@ -117,6 +145,43 @@ export function workshopPanel(samplers) {
 
       </section>
 
+      <section data-page="comic" hidden>
+        <p class="studio-note" data-field="comicSource"></p>
+        <div class="studio-grid">
+          <label>每页版式<select data-field="comicLayout" data-lock>${Object.entries(COMIC_LAYOUTS).map(([key,layout]) =>
+              `<option value="${key}">${layout.name}</option>`).join('')}</select></label>
+          <label>页数<select data-field="comicPages" data-lock><option>1</option><option>2</option><option>3</option></select></label>
+        </div>
+        <button type="button" data-field="comicPlan" data-lock>生成分镜草稿</button>
+        <div class="studio-stack" data-field="comicEditor" hidden>
+          <h3 data-field="comicTitle"></h3>
+          <p class="studio-note" data-field="comicWorkStatus" role="status"></p>
+          <button type="button" class="studio-primary" data-field="comicGenerate" data-lock>确认分镜并生成</button>
+          <div class="studio-row">
+            <label class="studio-grow">预览页<select data-field="comicPage" data-lock></select></label>
+            <button type="button" data-field="comicExport" data-lock>下载本页 PNG</button>
+          </div>
+          <canvas class="studio-comic-canvas" data-field="comicCanvas" role="img" aria-label="当前漫画页预览"></canvas>
+          <label>当前画格<select data-field="comicPanel" data-lock></select></label>
+          <p class="studio-note" data-field="comicQuote"></p>
+          <div class="studio-row">
+            <button type="button" data-field="comicSingle" data-lock>生成这格</button>
+            <button type="button" data-field="comicUndo" data-lock hidden>切换上一版</button>
+          </div>
+          <details class="studio-card studio-stack">
+            <summary>编辑画面与文字</summary>
+            <label>画面内容<textarea rows="3" maxlength="1200" data-field="comicScene" data-lock></textarea></label>
+            <label>景别与取景<input maxlength="280" data-field="comicFraming" data-lock></label>
+            <div class="studio-row">
+              <button type="button" data-field="comicEarlier" data-lock>移到前一格</button>
+              <button type="button" data-field="comicLater" data-lock>移到后一格</button>
+            </div>
+            <div class="studio-stack" data-field="comicLetters"></div>
+            <button type="button" data-field="comicAddLetter" data-lock>添加文字</button>
+          </details>
+        </div>
+      </section>
+
       <section data-page="prompts" hidden>
         <h3>提示词编辑</h3>
         <p class="studio-note" data-field="draftSource"></p>
@@ -125,7 +190,12 @@ export function workshopPanel(samplers) {
           <button type="button" data-field="plan" data-lock>从楼层提取草稿</button>
           <button type="button" data-field="copyPrompt">复制当前提示词</button>
         </div>
-        <label>正面提示词<textarea data-field="positive" rows="4" data-lock placeholder="场景、人数、动作、镜头和光影"></textarea></label>
+        <details class="studio-card studio-stack" data-field="shotDetails" hidden>
+          <summary>编辑镜头方案</summary>
+          <div class="studio-grid" data-field="shotFields"></div>
+          <div class="studio-stack" data-field="shotActions"></div>
+        </details>
+        <label><span data-field="positiveLabel">正面提示词</span><textarea data-field="positive" rows="4" data-lock placeholder="场景、人数、动作、镜头和光影"></textarea></label>
         <label>负面提示词<textarea data-field="negative" rows="2" data-lock></textarea></label>
         <label class="studio-check"><input type="checkbox" data-field="applyStyle" data-lock>使用参考图的局部色彩和辅光</label>
         <div class="studio-row"><h3>独立人物提示词</h3><button type="button" data-field="addRole" data-lock>添加人物</button></div>
@@ -206,6 +276,7 @@ export function workshopPanel(samplers) {
           <div class="studio-row">
             <a data-field="historyDownload">下载原图</a>
             <button type="button" data-field="redrawHistory" data-lock hidden>重画这张</button>
+            <button type="button" data-field="recipeCompare" data-lock hidden>以当前配方对照</button>
             <button type="button" data-field="reuse" data-lock>载入提示词与参数</button>
             <button type="button" data-field="removeImage" data-lock>删除记录</button>
           </div>
