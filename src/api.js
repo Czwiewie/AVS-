@@ -46,6 +46,10 @@ export function knownNaiModel(model) {
     if (typeof model === 'string') return MODELS.find(id => id === model.trim().toLowerCase());
 }
 
+export function isGptImageModel(model) {
+    return typeof model === 'string' && /(?:^|[/:])gpt-image(?:[-.:]|$)/i.test(model.trim());
+}
+
 function naiFormat(connection) {
     return knownNaiModel(connection.imageModel) ?? connection.naiModel;
 }
@@ -165,7 +169,7 @@ export function makeImageBody(connection, plan, style, options) {
     const prompt = compileImagePrompt(protocol,plan,style).base;
     if (Object.hasOwn(NATIVE_IMAGE_PROVIDERS,protocol)) return nativeImageBody(protocol,connection,prompt);
     return {model, prompt, n:1, size:connection.otherSize || 'auto',
-        ...(connection.otherReply === 'b64_json' ? {response_format:'b64_json'} : {})};
+        ...(connection.otherReply === 'b64_json' && !isGptImageModel(model) ? {response_format:'b64_json'} : {})};
 }
 
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
@@ -228,9 +232,12 @@ export function generate(config, key, body, signal, onReceiving) {
                 if (!link || !['http:', 'https:'].includes(link.protocol) || link.username || link.password || link.hash) {
                     throw Error('回图链接须为有效的 HTTP(S) 地址。');
                 }
-                const directImage = protocol !== 'openai' ? '' : body.response_format === 'b64_json'
-                    ? '当前请求了 Base64，但服务商仍返回链接。请核对服务商支持的回图格式。'
-                    : '可在「连接」尝试选择 Base64 回图，或请服务商提供可跨域直读的图片链接。';
+                let directImage = '';
+                if (protocol === 'openai') {
+                    if (isGptImageModel(body.model)) directImage = '请服务商直接返回图片数据，或提供可跨域直读的链接。';
+                    else if (body.response_format === 'b64_json') directImage = '当前请求了 Base64，但服务商仍返回链接。请核对服务商支持的回图格式。';
+                    else directImage = '可在「连接」尝试选择 Base64 回图，或请服务商提供可跨域直读的图片链接。';
+                }
                 let download;
                 try {
                     download = await fetch(link, {signal:requestSignal, credentials:'omit', redirect:'error', referrerPolicy:'no-referrer'});

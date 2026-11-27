@@ -210,6 +210,7 @@ export function workshopPanel(samplers) {
                 <option value="default">服务商默认</option>
                 <option value="b64_json">Base64（服务商支持时）</option>
               </select></label>
+              <small data-field="gptReplyNote" hidden>GPT Image 使用服务商默认回图格式。</small>
             </div>
             ${nativeImageConnection('grok')}
             ${nativeImageConnection('gemini')}

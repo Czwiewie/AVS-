@@ -1,5 +1,5 @@
 import {sourceAt, prose, optionalLooks, priorContext} from './scene.js';
-import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageBody, availableModels} from './api.js';
+import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, isGptImageModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageBody, availableModels} from './api.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 import {pictureLibrary} from './library.js';
 import {createAcademyFeedback} from './theme.js';
@@ -8,7 +8,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.7';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.8';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -174,7 +174,9 @@ export function installStudio(host, owner, kind, css) {
             field('grokQualityRow').hidden = protocol !== 'grok' || !allowed.qualities.length;
         }
         field('otherSizeRow').hidden = !generic;
-        field('otherReplyRow').hidden = !generic;
+        const gptImage = generic && isGptImageModel(text('otherModel'));
+        field('otherReplyRow').hidden = !generic || gptImage;
+        field('gptReplyNote').hidden = !gptImage;
         field('naiModelRow').hidden = !nai && !explicitModel;
         field('naiModelLabel').textContent = other && !explicitModel ? 'NovelAI 参数格式' : '生图模型';
         const selected = selectedNaiModel();
@@ -572,7 +574,7 @@ export function installStudio(host, owner, kind, css) {
             } else {
                 field('otherModel').value = model;
                 field('otherSize').value = detail.otherSize || 'auto';
-                field('otherReply').value = detail.otherReply || defaults.otherReply;
+                if (!isGptImageModel(model)) field('otherReply').value = detail.otherReply || defaults.otherReply;
             }
         }
         field('naiModel').value = knownNaiModel(detail.naiModel) ?? knownNaiModel(model) ?? MODELS[0];
