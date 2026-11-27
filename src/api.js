@@ -89,11 +89,17 @@ async function request(url, key, body, signal, read, protocol) {
         } else if (key?.trim()) headers.Authorization = 'Bearer ' + key.trim();
         const r = await fetch(url, {method: 'POST', credentials: 'omit', redirect: 'error', signal: ctl.signal,
             headers, body: JSON.stringify(body)});
-        if (!r.ok) throw serviceError(r.status,await r.text(),key);
+        if (!r.ok) {
+            const detail = await r.text().catch(() => '');
+            throw serviceError(r.status,detail,key);
+        }
         return await read(r, ctl.signal);
     } catch (e) {
         if (ctl.signal.aborted) throw Error(ctl.signal.reason === 'timeout' ? '等待服务商超过 5 分钟。' : '已取消。');
-        if (e instanceof TypeError) throw Error('浏览器无法读取服务商响应。请检查地址、网络与跨域权限。');
+        if (e instanceof TypeError) {
+            if (protocol) throw Error('浏览器未取得可读取的生图接口响应。请核对服务商文档中的最终地址，以及该端点的网络和跨域权限。');
+            throw Error('浏览器无法读取服务商响应。请检查地址、网络与跨域权限。');
+        }
         throw e;
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', stop); }
 }
@@ -158,13 +164,14 @@ export function makeImageBody(connection, plan, style, options) {
     if (protocol === 'nai') return {...naiBody(naiFormat(connection),plan,style,options),model};
     const prompt = compileImagePrompt(protocol,plan,style).base;
     if (Object.hasOwn(NATIVE_IMAGE_PROVIDERS,protocol)) return nativeImageBody(protocol,connection,prompt);
-    return {model, prompt, n:1, size:connection.otherSize || 'auto'};
+    return {model, prompt, n:1, size:connection.otherSize || 'auto',
+        ...(connection.otherReply === 'b64_json' ? {response_format:'b64_json'} : {})};
 }
 
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 100 * 1024 * 1024;
 
-async function imageResponseBytes(response, limit = MAX_RESPONSE_BYTES, signal) {
+async function imageResponseBytes(response, limit, signal, interrupted) {
     if (Number(response.headers.get('content-length')) > limit) throw Error('生图响应超过工坊的读取上限。');
     if (!response.body) throw Error('生图服务返回了空响应。');
     const reader = response.body.getReader(), chunks = [];
@@ -178,6 +185,9 @@ async function imageResponseBytes(response, limit = MAX_RESPONSE_BYTES, signal) 
             if (size > limit) throw Error('生图响应超过工坊的读取上限。');
             chunks.push(value);
         }
+    } catch (error) {
+        if (interrupted && error instanceof TypeError && !signal?.aborted) throw Error(interrupted);
+        throw error;
     } finally {
         void reader.cancel().catch(() => {});
         reader.releaseLock();
@@ -195,7 +205,8 @@ export function generate(config, key, body, signal, onReceiving) {
     const protocol = config.imageProtocol || 'nai';
     return request(endpoint(config.imageBase || config.naiBase, IMAGE_PATHS[protocol]), key, body, signal, async (r, requestSignal) => {
         onReceiving();
-        const bytes = await imageResponseBytes(r,MAX_RESPONSE_BYTES,requestSignal);
+        const bytes = await imageResponseBytes(r,MAX_RESPONSE_BYTES,requestSignal,
+            '已收到生图接口响应，但读取响应体时连接中断。请检查服务商连接或响应状态。');
         if (protocol === 'gemini') {
             let result;
             try { result = JSON.parse(new TextDecoder().decode(bytes)); }
@@ -210,13 +221,28 @@ export function generate(config, key, body, signal, onReceiving) {
             signal:requestSignal,
             readError:error => serviceError(null,error,key),
             loadImageUrl:async value => {
-                const link = new URL(value);
-                if (value.length > 8192 || !['http:', 'https:'].includes(link.protocol) || link.username || link.password || link.hash) {
+                let link;
+                if (value.length <= 8192) {
+                    try { link = new URL(value); } catch { /* Invalid URL. */ }
+                }
+                if (!link || !['http:', 'https:'].includes(link.protocol) || link.username || link.password || link.hash) {
                     throw Error('回图链接须为有效的 HTTP(S) 地址。');
                 }
-                const download = await fetch(link, {signal:requestSignal, credentials:'omit', redirect:'error', referrerPolicy:'no-referrer'});
-                if (!download.ok) throw Error('图片链接响应 HTTP ' + download.status);
-                return imageResponseBytes(download,MAX_IMAGE_BYTES,requestSignal);
+                const directImage = protocol !== 'openai' ? '' : body.response_format === 'b64_json'
+                    ? '当前请求了 Base64，但服务商仍返回链接。请核对服务商支持的回图格式。'
+                    : '可在「连接」尝试选择 Base64 回图，或请服务商提供可跨域直读的图片链接。';
+                let download;
+                try {
+                    download = await fetch(link, {signal:requestSignal, credentials:'omit', redirect:'error', referrerPolicy:'no-referrer'});
+                } catch (error) {
+                    if (error instanceof TypeError && !requestSignal.aborted) {
+                        throw Error('生图接口已返回图片链接，但浏览器无法下载图片（' + link.hostname + '）。' + directImage);
+                    }
+                    throw error;
+                }
+                if (!download.ok) throw Error('图片链接响应 HTTP ' + download.status + '。' + directImage);
+                return imageResponseBytes(download,MAX_IMAGE_BYTES,requestSignal,
+                    '图片链接已响应，但下载图片时连接中断（' + link.hostname + '）。' + directImage);
             }
         });
     },protocol);

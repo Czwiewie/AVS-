@@ -206,6 +206,10 @@ export function workshopPanel(samplers) {
                 <option value="1024x1536">竖幅 · 1024 × 1536</option>
                 <option value="1536x1024">横幅 · 1536 × 1024</option>
               </select></label>
+              <label data-field="otherReplyRow">回图格式<select data-field="otherReply" data-lock>
+                <option value="default">服务商默认</option>
+                <option value="b64_json">Base64（服务商支持时）</option>
+              </select></label>
             </div>
             ${nativeImageConnection('grok')}
             ${nativeImageConnection('gemini')}

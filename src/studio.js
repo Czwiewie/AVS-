@@ -8,7 +8,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.6';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.7';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -41,7 +41,7 @@ export function installStudio(host, owner, kind, css) {
     });
     const id = 'avs-illustration-studio';
     const defaults = {visionBase:'https://api.openai.com/v1', visionModel:'', naiBase:OFFICIAL_NAI,
-        naiModel:MODELS[0], imageProvider:'official', otherProtocol:'openai', otherBase:'', otherModel:'', otherSize:'auto',
+        naiModel:MODELS[0], imageProvider:'official', otherProtocol:'openai', otherBase:'', otherModel:'', otherSize:'auto', otherReply:'default',
         grokBase:NATIVE_IMAGE_PROVIDERS.grok.base, grokModel:'grok-imagine-image-2.0', grokAspect:'2:3', grokResolution:'1K', grokQuality:'auto',
         geminiBase:NATIVE_IMAGE_PROVIDERS.gemini.base, geminiModel:'gemini-nano-banana-2.1', geminiAspect:'2:3', geminiResolution:'1K'};
     const nativeProtocols = Object.keys(NATIVE_IMAGE_PROVIDERS);
@@ -174,6 +174,7 @@ export function installStudio(host, owner, kind, css) {
             field('grokQualityRow').hidden = protocol !== 'grok' || !allowed.qualities.length;
         }
         field('otherSizeRow').hidden = !generic;
+        field('otherReplyRow').hidden = !generic;
         field('naiModelRow').hidden = !nai && !explicitModel;
         field('naiModelLabel').textContent = other && !explicitModel ? 'NovelAI 参数格式' : '生图模型';
         const selected = selectedNaiModel();
@@ -450,7 +451,8 @@ export function installStudio(host, owner, kind, css) {
         const native = NATIVE_IMAGE_PROVIDERS[row.imageProtocol];
         const params = native ? [['接口',native.label],['画幅比例',row.nativeOptions?.aspect],
             ['分辨率',row.nativeOptions?.resolution],...(row.nativeOptions?.quality ? [['画质',row.nativeOptions.quality]] : [])]
-            : row.imageProtocol === 'openai' ? [['接口','OpenAI 兼容'], ['请求画幅',row.otherSize]] : [
+            : row.imageProtocol === 'openai' ? [['接口','OpenAI 兼容'], ['请求画幅',row.otherSize],
+                ['请求回图格式',row.otherReply === 'b64_json' ? 'Base64' : '服务商默认']] : [
             ['采样器',SAMPLERS[row.draw.sampler]], ['步数',row.draw.steps],
             ['引导强度',row.draw.scale], ['CFG Rescale',row.draw.rescale],
             ['自动质量标签',row.draw.quality ? '开启' : '关闭']
@@ -570,6 +572,7 @@ export function installStudio(host, owner, kind, css) {
             } else {
                 field('otherModel').value = model;
                 field('otherSize').value = detail.otherSize || 'auto';
+                field('otherReply').value = detail.otherReply || defaults.otherReply;
             }
         }
         field('naiModel').value = knownNaiModel(detail.naiModel) ?? knownNaiModel(model) ?? MODELS[0];
@@ -665,6 +668,7 @@ export function installStudio(host, owner, kind, css) {
             stored.imageProvider = 'other';
             stored.otherProtocol = text('otherProtocol');
             stored.otherSize = text('otherSize');
+            stored.otherReply = text('otherReply');
         }
         writeKey(kind,url,key);
         save();
@@ -738,6 +742,7 @@ export function installStudio(host, owner, kind, css) {
                 const row = {id:uniqueId(), source:source.key, text:source.text, index:source.index, blob,
                     date:Date.now(), model:body.model, naiModel:connection.naiModel, styleName:style?.name,
                     imageProvider:connection.imageProvider, imageProtocol:connection.imageProtocol, otherSize:connection.otherSize,
+                    otherReply:body.response_format === 'b64_json' && connection.imageProtocol === 'openai' ? 'b64_json' : undefined,
                     draw, nativeOptions, resultSize:{width:img.naturalWidth,height:img.naturalHeight},
                     seed:body.parameters?.seed,
                     plan:native ? {base:body.input, negative:body.parameters.negative_prompt,
