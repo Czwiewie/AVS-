@@ -1,5 +1,6 @@
-import {sourceAt, prose, optionalLooks, priorContext} from './scene.js';
-import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, isGptImageModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageBody, availableModels} from './api.js';
+import {archiveScope, publicSource, suggestedIdentity} from './identity.js';
+import {sourceAt, prose, optionalLooks, priorContext, archivePeople, passageRanges, withPassage} from './scene.js';
+import {MODELS, MODEL_NAMES, OFFICIAL_NAI, IMAGE_PATHS, STYLE_FIELDS, SAMPLERS, DRAW_DEFAULTS, knownNaiModel, isGptImageModel, endpoint, extractStyle, planScene, generate, drawOptions, compileImagePrompt, makeImageRequest, supportsIdentityImages, availableModels} from './api.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 import {pictureLibrary} from './library.js';
 import {createAcademyFeedback} from './theme.js';
@@ -8,7 +9,7 @@ import {workshopPanel, CANVASES} from './panel.js';
 
 export function installStudio(host, owner, kind, css) {
     const {document, Option, MutationObserver, Image, URL} = host;
-    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.8';
+    const slot = '__AVS_ILLUSTRATION_STUDIO__', legacy = '__AVS_VISUAL_WORKSHOP_R2__', version = '1.2.11';
     const existing = host[slot];
     if (existing) {
         const order = version.localeCompare(existing.version ?? '', 'en', {numeric:true});
@@ -46,7 +47,7 @@ export function installStudio(host, owner, kind, css) {
         geminiBase:NATIVE_IMAGE_PROVIDERS.gemini.base, geminiModel:'gemini-nano-banana-2.1', geminiAspect:'2:3', geminiResolution:'1K'};
     const nativeProtocols = Object.keys(NATIVE_IMAGE_PROVIDERS);
     const keyKinds = ['vision','nai','other',...nativeProtocols];
-    const styleNames = {line:'线条', color:'色彩', light:'光影', rendering:'渲染', composition:'构图'};
+    const styleNames = {line:'线条（仅保存）', color:'局部色彩', light:'辅助光', rendering:'渲染（仅保存）', composition:'构图（仅保存）'};
     const builtInPresets = [
         {id:'portrait', name:'剧情竖幅', draw:{width:832,height:1216}},
         {id:'landscape', name:'宽幅场景', draw:{width:1344,height:768}},
@@ -57,8 +58,11 @@ export function installStudio(host, owner, kind, css) {
     const uniqueId = () => host.crypto.randomUUID?.() ?? Array.from(host.crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8,'0')).join('');
     const temporaryPictures = new Map();
     let dialog, observer, entry, job, phase, activePage = 'draw', disposed = false, refreshVersion = 0;
-    let previewUrl, historyUrl, detail, rows = [], draftAnchor = null;
+    let previewUrl, historyUrl, detail, previewRow, rows = [], draftAnchor = null;
+    let pickedPassage, pickingSource, retrySource, passageStart = -1;
     const thumbnailUrls = [];
+    const roleBindings = new WeakMap();
+    let identityRequest = 0, identityPreview = 0, identityPeople = [], identityScope = '', suggested = null;
     const field = key => dialog.querySelector('[data-field="' + key + '"]');
     const text = key => field(key).value.trim();
     const checked = key => field(key).checked;
@@ -251,7 +255,7 @@ export function installStudio(host, owner, kind, css) {
     function activeStyle() { return savedStyles().find(style => style.id === settings().selectedStyle); }
     function populateStyles() {
         const styles = savedStyles(), selected = activeStyle();
-        const options = [new Option('不叠加画风',''), ...styles.map(style => new Option(style.name, style.id))];
+        const options = [new Option('不使用附加参考',''), ...styles.map(style => new Option(style.name, style.id))];
         field('styles').replaceChildren(...options);
         field('styles').value = selected?.id || '';
         field('styleName').value = selected?.name || '';
@@ -345,21 +349,84 @@ export function installStudio(host, owner, kind, css) {
         setStatus('已删除绘图预设。');
     }
 
-    function selectedSource() {
+    const sameFloor = (first, second) => first?.key === second?.key && first?.text === second?.text;
+    function selectedFloor() {
         if (text('mode') === 'manual') return {key:'manual', text:'', index:null};
         return sourceAt(context(), text('floor') || 'latest');
     }
+    function selectedSource() {
+        const source = selectedFloor();
+        return sameFloor(source,pickedPassage) ? withPassage(source,pickedPassage.passage) : source;
+    }
     function matches(source) {
         try {
-            const current = source.index === null ? selectedSource() : sourceAt(context(), source.index);
-            return current.key === source.key && current.text === source.text;
+            const current = source.index === null ? selectedFloor() : sourceAt(context(),source.index);
+            return sameFloor(current,source);
         } catch { return false; }
     }
+    function isSelectedFloor(source) {
+        try { return sameFloor(selectedFloor(),source); }
+        catch { return false; }
+    }
     function isSelected(source) {
-        try {
-            const current = selectedSource();
-            return current.key === source.key && current.text === source.text;
-        } catch { return false; }
+        if (!isSelectedFloor(source)) return false;
+        const passage = selectedSource().passage;
+        return passage?.start === source.passage?.start && passage?.end === source.passage?.end;
+    }
+    function showSource(source) {
+        const manual = source.index === null;
+        const passage = source.passage;
+        field('excerpt').textContent = manual ? '手写模式 · 在「提示词」填写画面。' :
+            '#' + source.index + ' · ' + (passage ? '已指定片段 · ' : '') +
+            (source.selectedText ?? source.visualText).replace(/\s+/g,' ').slice(0,150);
+        field('clearPassage').hidden = !passage;
+        field('make').textContent = manual ? '按手写提示词生成' : passage ? '画这一段' :
+            text('floor') === 'latest' ? '一键画当前回复' : '一键画所选楼层';
+        field('retryDrawing').hidden = !retrySource || !isSelected(retrySource);
+    }
+    function closePassagePicker() {
+        pickingSource = null;
+        passageStart = -1;
+        field('passagePicker').hidden = true;
+        field('pickPassage').setAttribute('aria-expanded','false');
+        field('passageRows').replaceChildren();
+    }
+    function openPassagePicker() {
+        if (pickingSource) { closePassagePicker(); return; }
+        const source = selectedSource();
+        const segments = passageRanges(source.visualText);
+        if (!segments.length) throw Error('当前回复没有可选的正文片段。');
+        pickingSource = source;
+        passageStart = -1;
+        field('passagePicker').hidden = false;
+        field('pickPassage').setAttribute('aria-expanded','true');
+        const hint = field('passageHelp');
+        hint.textContent = '轻点起点，再点终点。单段可点同一项两次。';
+        const container = field('passageRows');
+        const buttons = segments.map((segment,index) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.dataset.lock = '';
+            button.textContent = segment.text;
+            button.setAttribute('aria-pressed','false');
+            button.onclick = () => {
+                if (!isSelectedFloor(source)) { closePassagePicker(); setStatus('回复已变更，请重新选择片段。','warning'); return; }
+                if (passageStart < 0) {
+                    passageStart = index;
+                    button.setAttribute('aria-pressed','true');
+                    hint.textContent = '已选起点。点终点完成，点同一项只画这一段。';
+                    return;
+                }
+                const start = segments[Math.min(passageStart,index)].start;
+                const end = segments[Math.max(passageStart,index)].end;
+                pickedPassage = withPassage(source,{start,end,text:source.visualText.slice(start,end)});
+                closePassagePicker();
+                showSource(pickedPassage);
+                field('make').focus({preventScroll:true});
+            };
+            return button;
+        });
+        container.replaceChildren(...buttons);
     }
     function floorLabel(index) { return index === null ? '手写提示词' : '第 ' + index + ' 楼'; }
     function portraitFile(row) { return 'AVS-' + (row.index ?? 'manual') + '-' + (row.seed ?? 'original') + '.' + row.blob.type.split('/')[1]; }
@@ -373,12 +440,24 @@ export function installStudio(host, owner, kind, css) {
             modelLabel(row.model), (row.resultSize?.width ?? row.draw.width) + '×' + (row.resultSize?.height ?? row.draw.height), row.seed == null ? '' : '种子 ' + row.seed, row.styleName
         ].filter(Boolean).join(' · ') : '旧版预览';
     }
+    const versionSeries = row => row?.id ? rows.filter(item =>
+        (item.seriesId || item.id) === (row.seriesId || row.id)) : [];
     function paintPreview(row, history = false) {
         const url = history ? historyUrl : previewUrl;
         if (url) URL.revokeObjectURL(url);
         const next = row?.blob ? URL.createObjectURL(row.blob) : null;
         if (history) historyUrl = next;
-        else previewUrl = next;
+        else {
+            previewUrl = next;
+            previewRow = row;
+            field('redrawPreview').hidden = !row?.plan;
+            const versions = versionSeries(row);
+            const index = versions.indexOf(row);
+            field('previewVersions').hidden = versions.length < 2 || index < 0;
+            field('olderPreview').hidden = index >= versions.length - 1;
+            field('newerPreview').hidden = index <= 0;
+            field('versionLabel').textContent = (versions.length - index) + ' / ' + versions.length;
+        }
         const holder = field(history ? 'historyDetail' : 'result');
         const image = field(history ? 'historyImage' : 'image');
         const link = field(history ? 'historyDownload' : 'download');
@@ -389,7 +468,14 @@ export function installStudio(host, owner, kind, css) {
         image.src = next;
         link.href = next;
         link.download = portraitFile(row);
-        field(history ? 'historyMeta' : 'caption').textContent = floorLabel(row.index) + ' · ' + pictureLabel(row);
+        field(history ? 'historyMeta' : 'caption').textContent = floorLabel(row.index) +
+            (row.passage ? ' · ' + row.passage.text.replace(/\s+/g,' ').slice(0,32) : '') + ' · ' + pictureLabel(row);
+    }
+    function changePreviewVersion(offset) {
+        if (!previewRow) return;
+        const versions = versionSeries(previewRow);
+        const next = versions[versions.indexOf(previewRow) + offset];
+        if (next) paintPreview(next);
     }
     function clearThumbnails() {
         for (const url of thumbnailUrls.splice(0)) URL.revokeObjectURL(url);
@@ -446,6 +532,7 @@ export function installStudio(host, owner, kind, css) {
         detail = row;
         paintPreview(row, true);
         field('reuse').hidden = !row?.plan;
+        field('redrawHistory').hidden = !row?.plan;
         field('removeImage').hidden = !row?.id;
         const box = field('metadataBox');
         box.hidden = !row?.plan;
@@ -459,6 +546,7 @@ export function installStudio(host, owner, kind, css) {
             ['引导强度',row.draw.scale], ['CFG Rescale',row.draw.rescale],
             ['自动质量标签',row.draw.quality ? '开启' : '关闭']
         ];
+        if (row.identityImages?.length) params.push(['人物参考图',row.identityImages.join('、')]);
         const cells = params.flatMap(([label, value]) => {
             const name = document.createElement('dt'), cell = document.createElement('dd');
             name.textContent = label;
@@ -487,20 +575,26 @@ export function installStudio(host, owner, kind, css) {
         field('floorGroup').hidden = manual;
         field('focusGroup').hidden = manual;
         field('plan').hidden = manual;
+        field('passageActions').hidden = manual;
         let source;
         paintPreview(null); rows = []; detail = null; renderHistory();
         try {
+            const floor = selectedFloor();
+            if (!sameFloor(floor,pickedPassage)) pickedPassage = null;
+            if (pickingSource && !sameFloor(floor,pickingSource)) closePassagePicker();
             source = selectedSource();
-            field('excerpt').textContent = manual ? '可直接填写场景、负面词和人物分栏。' :
-                '#' + source.index + ' · ' + source.visualText.replace(/\s+/g, ' ').slice(0,160);
+            showSource(source);
         } catch(error) {
+            closePassagePicker();
+            field('passageActions').hidden = true;
+            field('retryDrawing').hidden = true;
             field('excerpt').textContent = error.message;
             return;
         }
         let saved = [];
         try { saved = await pictures.list(source); }
         catch { if (!job && latestRequest === refreshVersion) setStatus('本机图库暂不可用，仍可下载生成的原图。','warning'); }
-        if (latestRequest !== refreshVersion || !dialog.open || !isSelected(source)) return;
+        if (latestRequest !== refreshVersion || !dialog.open || !isSelectedFloor(source)) return;
         rows = [...(temporaryPictures.get(source.key) || []).filter(row => row.text === source.text), ...saved].slice(0,30);
         paintPreview(rows[0]); renderHistory();
     }
@@ -510,7 +604,173 @@ export function installStudio(host, owner, kind, css) {
         for (const button of dialog.querySelectorAll('[data-tab]')) button.setAttribute('aria-pressed', String(button.dataset.tab === page));
         const scroll = field('scroll'); scroll.scrollTop = 0;
         if (page === 'gallery') renderHistory();
+        if (page !== 'draw') closePassagePicker();
+        if (page === 'identity') void refreshIdentities();
         if (page !== 'gallery') { clearThumbnails(); if (historyUrl) paintPreview(null,true); }
+    }
+
+    const readBindings = scope => settings().identityBindings?.[scope] ?? {};
+    const imageKey = (scope, id) => JSON.stringify([scope,id]);
+    const selectedIdentity = () => identityPeople.find(person => person.id === text('identityPerson'));
+    function currentIdentity() {
+        const person = selectedIdentity();
+        const scope = archiveScope(context());
+        if (!person || scope !== identityScope) throw Error('聊天已切换，请重新选择档案角色。');
+        return {person, scope, record:readBindings(scope)[person.id]};
+    }
+    function writeIdentity(scope, id, record) {
+        const all = settings().identityBindings ??= {};
+        (all[scope] ??= {})[id] = record;
+        save();
+    }
+    function setLink(key, url) {
+        const link = field(key);
+        link.hidden = !url;
+        if (url) link.href = url;
+        else link.removeAttribute('href');
+    }
+    function setIdentityInputs(record = {}) {
+        field('identityName').value = record.name ?? '';
+        field('identityWork').value = record.work ?? '';
+        field('identityRoman').value = record.romanName ?? '';
+        field('identityAliases').value = (record.aliases ?? []).join(', ');
+        field('identityFeatures').value = record.features ?? '';
+        field('identityTags').value = record.tags ?? '';
+        field('identitySource').value = record.source ?? '';
+    }
+    function syncIdentityForm() {
+        const person = selectedIdentity();
+        const record = person && readBindings(identityScope)[person.id];
+        const fan = text('identityType') === 'fan';
+        const saved = fan && record?.type === 'fan';
+        suggested = person && suggestedIdentity(person.name);
+        field('fanFields').hidden = !fan;
+        field('identitySave').disabled = !!job || !text('identityType');
+        field('identitySuggestion').hidden = !suggested;
+        if (suggested) field('identitySuggestion').textContent = '使用候选 · ' + suggested.workLabel + '／' + suggested.name;
+        if (person) setLink('identitySearch','https://zh.moegirl.org.cn/index.php?search=' + encodeURIComponent(person.name));
+        setLink('identitySourceLink',saved ? record.source : '');
+        field('identityImageBox').hidden = !saved;
+        field('identityOfficialImage').hidden = !saved || !record.portrait;
+        setLink('identityPortraitLink',saved && record.portrait);
+        field('identityRemoveImage').hidden = !saved || !record.imageToken;
+    }
+    async function showIdentity() {
+        const preview = ++identityPreview;
+        const person = selectedIdentity(), image = field('identityImage');
+        image.hidden = true;
+        image.removeAttribute('src');
+        field('identityForm').hidden = !person;
+        if (!person) return;
+        const record = readBindings(identityScope)[person.id];
+        field('identityType').value = record?.type ?? '';
+        setIdentityInputs(record);
+        syncIdentityForm();
+        if (record?.type !== 'fan' || !record.imageToken) return;
+        const data = await pictures.getIdentityImage(imageKey(identityScope,person.id));
+        if (preview !== identityPreview || disposed) return;
+        if (data?.token === record.imageToken) {
+            image.src = 'data:' + data.type + ';base64,' + data.data;
+            image.hidden = false;
+        } else field('identityStatus').textContent = '本机参考图不可用，可以重新保存。';
+    }
+    async function refreshIdentities(reset = false) {
+        const request = ++identityRequest, select = field('identityPerson');
+        const scope = archiveScope(context()), previous = !reset && identityScope === scope ? select.value : '';
+        const bridge = host.__AVS_V4_BRIDGE__;
+        const status = field('identityStatus');
+        identityScope = scope;
+        identityPeople = [];
+        ++identityPreview;
+        field('identityForm').hidden = true;
+        select.replaceChildren(new Option('读取档案角色…',''));
+        status.textContent = '';
+        try {
+            const summary = scope ? await bridge?.fullInspector?.() : null;
+            if (request !== identityRequest || disposed || scope !== archiveScope(context())) return;
+            identityPeople = archivePeople(summary).sort((a,b) => Number(b.active) - Number(a.active));
+            select.replaceChildren(...identityPeople.map(person => new Option(person.name,person.id)));
+            if (!identityPeople.length) {
+                select.replaceChildren(new Option('暂无可绑定的档案角色',''));
+                status.textContent = scope ? '请先在当前聊天录入角色，再绑定原作身份。' : '请先打开一条已保存的聊天。';
+            } else if (identityPeople.some(person => person.id === previous)) select.value = previous;
+            await showIdentity();
+        } catch (error) {
+            if (request === identityRequest && !disposed) status.textContent = '读取角色参考失败 · ' + error.message;
+        }
+    }
+    async function saveIdentity() {
+        const {person,scope,record} = currentIdentity();
+        const type = text('identityType');
+        if (type === 'original') writeIdentity(scope,person.id,{...record,type});
+        else {
+            const name = text('identityName'), work = text('identityWork'), features = text('identityFeatures');
+            if (type !== 'fan' || !name || !work || !features) throw Error('请填写原作角色名、作品名和可辨认的外貌特征。');
+            const source = publicSource(text('identitySource'));
+            const romanName = text('identityRoman');
+            const samePerson = record?.name === name && record?.work === work;
+            const builtin = suggestedIdentity(romanName || name);
+            const portrait = builtin && builtin.source === source &&
+                [builtin.work,builtin.workLabel].includes(work) && [builtin.name,builtin.romanName].includes(name) ? builtin.portrait : '';
+            const aliases = text('identityAliases').split(/[,，]/).map(value => value.trim()).filter(Boolean);
+            writeIdentity(scope,person.id,{type,name,work,romanName,features,aliases,
+                tags:text('identityTags'),source,portrait,imageToken:samePerson ? record.imageToken : undefined});
+            if (record?.imageToken && !samePerson) await pictures.dropIdentityImage(imageKey(scope,person.id));
+        }
+        await showIdentity();
+        setStatus('已保存「' + person.name + '」的角色类型与资料。','success');
+    }
+    async function saveIdentityImage(file, signal) {
+        const {person,scope,record} = currentIdentity();
+        if (record?.type !== 'fan') throw Error('请先保存已确认同人角色的原作资料。');
+        stage('读取人物参考图');
+        if (!file) {
+            if (!record.portrait) throw Error('该角色暂无官方人物图。');
+            try {
+                const response = await fetch(record.portrait,{credentials:'omit',referrerPolicy:'no-referrer',
+                    signal:AbortSignal.any([signal,AbortSignal.timeout(15000)])});
+                if (!response.ok) throw Error('HTTP ' + response.status);
+                file = await response.blob();
+            } catch {
+                signal.throwIfAborted();
+                throw Error('浏览器无法直接读取官方人物图。可打开原图并保存到设备后上传。');
+            }
+        }
+        if (file.size > 16 * 1024 * 1024 || !['image/png','image/jpeg','image/webp'].includes(file.type)) {
+            throw Error('请使用 16 MB 内的 PNG、JPEG 或 WebP 人物参考图。');
+        }
+        const encoded = await raster(file);
+        const data = encoded.slice(encoded.indexOf(',') + 1);
+        const token = uniqueId();
+        signal.throwIfAborted();
+        if (scope !== archiveScope(context()) || readBindings(scope)[person.id] !== record) {
+            throw Error('角色资料已变更，请重新选择人物参考图。');
+        }
+        const blob = new Blob([Uint8Array.from(atob(data), char => char.charCodeAt(0))],{type:'image/jpeg'});
+        await pictures.putIdentityImage(imageKey(scope,person.id),{token,type:blob.type,data,blob});
+        writeIdentity(scope,person.id,{...record,imageToken:token});
+        if (scope === archiveScope(context())) await showIdentity();
+        setStatus('已保存「' + person.name + '」的人物参考图。','success');
+    }
+    async function removeIdentityImage() {
+        const {person,scope,record} = currentIdentity();
+        if (!record?.imageToken) return;
+        await pictures.dropIdentityImage(imageKey(scope,person.id));
+        writeIdentity(scope,person.id,{...record,imageToken:undefined});
+        if (scope === archiveScope(context())) await showIdentity();
+        setStatus('已移除人物参考图。');
+    }
+    async function identityImages(plan, connection, scope) {
+        if (!supportsIdentityImages(connection)) return [];
+        const chosen = plan.characters.map((role,index) => ({role,index})).filter(({role}) => role.imageToken).slice(0,3);
+        return Promise.all(chosen.map(async ({role,index}) => {
+            const current = readBindings(scope)[role.archiveId];
+            const image = await pictures.getIdentityImage(imageKey(scope,role.archiveId));
+            if (current?.type !== 'fan' || current.imageToken !== role.imageToken || image?.token !== role.imageToken) {
+                throw Error('「' + role.label + '」的人物参考图已变更，请重新提取草稿，或在人物分栏取消发送参考图。');
+            }
+            return {subject:index+1, name:role.label, image};
+        }));
     }
 
     function addRole(role = {}) {
@@ -522,25 +782,42 @@ export function installStudio(host, owner, kind, css) {
             <label>人物负面词<textarea rows="2" data-role="negative" data-lock></textarea></label>
             <button type="button" data-lock>移除此人物</button>`;
         for (const key of ['positive','negative']) card.querySelector('[data-role="'+key+'"]').value = role[key] || '';
+        if (role.label) card.querySelector('legend').textContent = role.label + ' · 原作身份已绑定';
+        if (role.identity?.imageToken) {
+            const label = document.createElement('label'), check = document.createElement('input');
+            label.className = 'studio-check';
+            check.type = 'checkbox'; check.checked = role.useReferenceImage; check.dataset.lock = ''; check.dataset.role = 'image';
+            label.append(check,'发送人物参考图（支持的线路）');
+            card.append(label);
+        }
+        if (role.identity) roleBindings.set(card,role);
         card.querySelector('button').onclick = () => card.remove();
         field('roles').append(card);
         if (job) for (const node of card.querySelectorAll('[data-lock]')) node.disabled = true;
     }
     function setDraft(plan, source = null, applyStyle = true) {
         draftAnchor = source;
+        retrySource = null;
+        field('retryDrawing').hidden = true;
         field('positive').value = plan.base;
         field('negative').value = plan.negative || '';
         field('roles').replaceChildren();
         for (const role of plan.characters) addRole(role);
         field('applyStyle').checked = applyStyle;
+        const confirmed = plan.characters.filter(role => role.label).map(role => role.label);
+        field('draftIdentities').hidden = !confirmed.length;
+        field('draftIdentities').textContent = confirmed.length ? '已匹配原作身份 · ' + confirmed.join('、') : '';
         field('draftSource').textContent = source ? '草稿来源 · ' + floorLabel(source.index)
-            + (plan.sourceQuote ? ' · ' + plan.sourceQuote.slice(0,100) : '') : '可直接填写，或从所选 AI 楼层提取再编辑。';
+            + (source.passage ? ' · 指定片段' : '') + (plan.sourceQuote ? ' · ' + plan.sourceQuote.slice(0,100) : '') : '可直接填写，或从所选 AI 楼层提取再编辑。';
     }
     function getDraft() {
-        const characters = Array.from(field('roles').children, card => ({
-            positive:card.querySelector('[data-role="positive"]').value.trim(),
-            negative:card.querySelector('[data-role="negative"]').value.trim()
-        })).filter(role => role.positive || role.negative);
+        const characters = Array.from(field('roles').children, card => {
+            const role = roleBindings.get(card);
+            return {positive:card.querySelector('[data-role="positive"]').value.trim(),
+                negative:card.querySelector('[data-role="negative"]').value.trim(),
+                archiveId:role?.archiveId, label:role?.label,
+                imageToken:card.querySelector('[data-role="image"]')?.checked ? role?.identity.imageToken : undefined};
+        }).filter(role => role.positive || role.negative);
         if (characters.some(role => !role.positive)) throw Error('有人物分栏只填了负面词，请补上人物正面词。');
         return {base:text('positive'), negative:text('negative'), characters};
     }
@@ -559,7 +836,10 @@ export function installStudio(host, owner, kind, css) {
     }
     function loadHistory() {
         if (!detail?.plan) return;
+        const floor = selectedFloor();
+        pickedPassage = detail.passage ? withPassage(floor,detail.passage) : null;
         const source = selectedSource();
+        showSource(source);
         const {model, plan, draw, seed} = detail;
         field('imageProvider').value = detail.imageProvider || 'official';
         if (detail.imageProvider === 'other') {
@@ -614,6 +894,7 @@ export function installStudio(host, owner, kind, css) {
             field('styleRemove').disabled = !activeStyle();
             field('styleUpdate').disabled = !activeStyle();
             field('presetDelete').disabled = builtInPresets.some(preset => preset.id === text('drawPreset'));
+            syncIdentityForm();
         }
     }
     async function run(action) {
@@ -681,7 +962,8 @@ export function installStudio(host, owner, kind, css) {
         if (source.index === null) throw Error('请选择 AI 回复作为画面来源。');
         if (!connection.visionModel || !connection.visionKey) throw Error('请在「连接」中填写视觉模型与密钥。');
         stage('读取' + floorLabel(source.index) + '与角色资料');
-        const looks = checked('useArchive') ? await optionalLooks(host.__AVS_V4_BRIDGE__,source) : [];
+        const scope = archiveScope(context());
+        const looks = await optionalLooks(host.__AVS_V4_BRIDGE__,source,readBindings(scope),checked('useArchive'));
         signal.throwIfAborted();
         if (!matches(source)) throw Error('原楼层已变更，请重新选择。');
         stage('等待视觉模型编译提示词');
@@ -706,32 +988,55 @@ export function installStudio(host, owner, kind, css) {
         go('prompts');
         setStatus('草稿已就绪，可编辑后出图。');
     }
-    async function illustrate(signal, edited = false) {
-        const source = sceneSelection();
-        const useDraft = edited || source.index === null;
-        const connection = readConnections({vision:!useDraft, image:true});
-        const draw = readDraw();
+    function redrawConnection(record) {
+        const connection = readConnections();
+        const imageProtocol = record.imageProtocol || 'nai';
+        const imageProvider = record.imageProvider || 'official';
+        const kind = nativeProtocols.includes(imageProtocol) ? imageProtocol : imageProvider === 'other' ? 'other' : 'nai';
+        const imageBase = connection[kind + 'Base'];
+        endpoint(imageBase,IMAGE_PATHS[imageProtocol]);
+        return {...connection,imageProtocol,imageProvider,imageBase,imageKey:connection[kind + 'Key'],imageModel:record.model,
+            naiModel:record.naiModel || knownNaiModel(record.model) || connection.naiModel,otherSize:record.otherSize,
+            otherReply:record.otherReply,
+            [imageProtocol + 'Aspect']:record.nativeOptions?.aspect,
+            [imageProtocol + 'Resolution']:record.nativeOptions?.resolution,
+            ...(imageProtocol === 'grok' ? {grokQuality:record.nativeOptions?.quality ?? 'auto'} : {})};
+    }
+    async function illustrate(signal, edited = false, previous = null) {
+        let source = sceneSelection();
+        if (previous) {
+            if (previous.source !== source.key || previous.text !== source.text) throw Error('原回复已切换，请从原楼层的历史重画。');
+            if (previous.identityImages?.length && !previous.requestPlan) {
+                throw Error('此旧图使用了人物参考图。请从原文重新提取草稿，以应用当前保存的参考图。');
+            }
+            source = previous.passage ? withPassage(source,previous.passage) : selectedFloor();
+        }
+        const useDraft = edited || !!previous || source.index === null;
+        const connection = previous ? redrawConnection(previous) : readConnections({vision:!useDraft, image:true});
+        const draw = previous ? {...previous.draw,seed:null,count:1} : readDraw();
         if (connection.imageProvider === 'official' && !connection.imageKey) throw Error('请在「连接」中填写 NovelAI Token。');
         const provider = NATIVE_IMAGE_PROVIDERS[connection.imageProtocol];
         if (provider && !connection.imageKey) throw Error('请在「连接」中填写 ' + provider.label + ' 的 API Key。');
         if (!connection.imageModel) throw Error('请在「连接」选择或填写生图模型。');
-        if (edited && source.index !== null && draftAnchor && !isSelected(draftAnchor)) {
+        if (edited && draftAnchor && !isSelected(draftAnchor)) {
             throw Error('草稿来自另一条回复。请选择原楼层，或从当前楼层重新提取草稿。');
         }
-        const style = checked('applyStyle') ? activeStyle() : null;
-        const plan = useDraft ? getDraft() : await compile(source,connection,signal);
-        if (!useDraft) setDraft(plan,source,checked('applyStyle'));
-        saveDraw();
-        if (isSelected(source)) go('draw');
+        const style = previous ? previous.requestStyle : checked('applyStyle') ? activeStyle() : null;
+        if (!useDraft) setDraft(await compile(source,connection,signal),source,checked('applyStyle'));
+        const plan = previous ? previous.requestPlan ?? previous.plan : getDraft();
+        const references = await identityImages(plan,connection,archiveScope(context()));
+        if (!previous) saveDraw();
+        if (isSelectedFloor(source) && activePage !== 'draw') go('draw');
         let completed = 0, storedCount = 0;
         try {
             for (let i=0; i<draw.count; i++) {
                 signal.throwIfAborted();
                 if (!matches(source)) throw Error('原楼层已变更，剩余图片已停止。');
                 const seed = draw.seed === null ? '' : (draw.seed + i) % 4294967296;
-                const body = makeImageBody(connection,plan,style,{...draw,seed});
-                stage('等待 ' + modelLabel(body.model) + ' 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
-                const blob = await generate(connection,connection.imageKey,body,signal, () => stage('读取第 ' + (i+1) + ' 张回图',i,draw.count));
+                const request = makeImageRequest(connection,plan,style,{...draw,seed},references);
+                const {body,model} = request;
+                stage('等待 ' + modelLabel(model) + ' 返回第 ' + (i+1) + '/' + draw.count + ' 张', i, draw.count);
+                const blob = await generate(connection,connection.imageKey,request,signal, () => stage('读取第 ' + (i+1) + ' 张回图',i,draw.count));
                 const url = URL.createObjectURL(blob);
                 const img = new Image();
                 try { img.src=url; await img.decode(); }
@@ -741,24 +1046,22 @@ export function installStudio(host, owner, kind, css) {
                     aspect:connection[connection.imageProtocol + 'Aspect'], resolution:connection[connection.imageProtocol + 'Resolution'],
                     ...(body.quality ? {quality:body.quality} : {})
                 } : undefined;
-                const row = {id:uniqueId(), source:source.key, text:source.text, index:source.index, blob,
-                    date:Date.now(), model:body.model, naiModel:connection.naiModel, styleName:style?.name,
+                const pictureId = uniqueId();
+                const row = {id:pictureId, seriesId:previous?.seriesId || previous?.id || pictureId,
+                    source:source.key, text:source.text, index:source.index, passage:source.passage, blob,
+                    requestPlan:plan, requestStyle:style, date:Date.now(), model, naiModel:connection.naiModel, styleName:style?.name,
                     imageProvider:connection.imageProvider, imageProtocol:connection.imageProtocol, otherSize:connection.otherSize,
                     otherReply:body.response_format === 'b64_json' && connection.imageProtocol === 'openai' ? 'b64_json' : undefined,
-                    draw, nativeOptions, resultSize:{width:img.naturalWidth,height:img.naturalHeight},
+                    draw, nativeOptions, identityImages:references.map(ref => ref.name), resultSize:{width:img.naturalWidth,height:img.naturalHeight},
                     seed:body.parameters?.seed,
                     plan:native ? {base:body.input, negative:body.parameters.negative_prompt,
                         characters:body.parameters.characterPrompts.map(role => ({positive:role.prompt,negative:role.uc}))} :
-                        {base:body.prompt ?? body.input,negative:'',characters:[]}};
+                        {base:request.prompt,negative:'',characters:[]}};
                 try { await pictures.add(row); storedCount++; }
                 catch { temporaryPictures.set(source.key, [row,...(temporaryPictures.get(source.key)||[])]); }
                 completed++;
                 stage('已收到 ' + completed + '/' + draw.count + ' 张',completed,draw.count);
-                if (source.index !== null && matches(source) && !isSelected(source)) {
-                    const old = field('floor').querySelector('option[value="' + source.index + '"]');
-                    if (old) field('floor').value = old.value;
-                }
-                if (isSelected(source)) {
+                if (isSelectedFloor(source)) {
                     ++refreshVersion;
                     rows = [row, ...rows.filter(item => item.source === row.source || !item.source)].slice(0,30);
                     paintPreview(row); renderHistory();
@@ -770,11 +1073,18 @@ export function installStudio(host, owner, kind, css) {
         } catch(error) {
             if (completed && !signal.aborted) throw Error(error.message + ' 已完成 ' + completed + ' 张。');
             if (!useDraft && !signal.aborted && matches(source)) {
-                throw Error(error.message + ' 提示词已保留，可在「提示词」页用现有草稿重试。');
+                retrySource = source;
+                field('retryDrawing').hidden = !isSelected(source);
+                throw Error(error.message + ' 提示词已保留。');
             }
             throw error;
         }
-        notify('已生成 ' + completed + ' 张插画。' + (storedCount < completed ? '部分图片仅保留在本页，请下载原图。' : ''));
+        if (!previous) {
+            retrySource = null;
+            field('retryDrawing').hidden = true;
+        }
+        const target = !isSelectedFloor(source) && source.index !== null ? '，见' + floorLabel(source.index) + '的历史' : '';
+        notify('已生成 ' + completed + ' 张插画' + target + '。' + (storedCount < completed ? '部分图片仅保留在本页，请下载原图。' : ''));
     }
 
     function action(key, fn) {
@@ -843,8 +1153,11 @@ export function installStudio(host, owner, kind, css) {
         for (const name of ['imageProvider','otherProtocol','otherSize','grokModel','grokAspect','grokResolution',
             'geminiModel','geminiAspect','geminiResolution']) field(name).onchange = syncImageFields;
         field('otherModel').oninput = syncImageFields;
-        field('floor').onchange = () => refresh();
-        field('mode').onchange = () => refresh();
+        for (const name of ['floor','mode']) field(name).onchange = () => {
+            pickedPassage = null;
+            closePassagePicker();
+            return refresh();
+        };
         field('drawPreset').onchange = () => {
             field('presetDelete').disabled = builtInPresets.some(preset => preset.id === text('drawPreset'));
         };
@@ -852,6 +1165,16 @@ export function installStudio(host, owner, kind, css) {
         field('styles').onchange = () => {
             settings().selectedStyle = text('styles'); save(); populateStyles();
         };
+        field('identityPerson').onchange = () => showIdentity().catch(error => notify(error.message,'error'));
+        field('identityType').onchange = syncIdentityForm;
+        field('identityUpload').onchange = event => {
+            const file = event.target.files[0]; event.target.value = '';
+            if (file) run(signal => saveIdentityImage(file,signal));
+        };
+        action('identitySuggestion', () => { if (suggested) setIdentityInputs(suggested); });
+        action('identitySave', () => run(saveIdentity));
+        action('identityOfficialImage', () => run(signal => saveIdentityImage(null,signal)));
+        action('identityRemoveImage', () => run(removeIdentityImage));
         field('upload').onchange = event => {
             const file = event.target.files[0]; event.target.value = '';
             if (file) run(signal => analyze(file,signal));
@@ -870,7 +1193,14 @@ export function installStudio(host, owner, kind, css) {
         action('copyPrompt', copyPrompt);
         action('plan', () => run(createDraft));
         action('make', () => run(illustrate));
+        action('pickPassage', openPassagePicker);
+        action('clearPassage', () => { pickedPassage = null; closePassagePicker(); showSource(selectedFloor()); });
+        action('redrawPreview', () => run(signal => illustrate(signal,false,previewRow)));
+        action('redrawHistory', () => run(signal => illustrate(signal,false,detail)));
+        action('olderPreview', () => changePreviewVersion(1));
+        action('newerPreview', () => changePreviewVersion(-1));
         action('drawDraft', () => run(signal => illustrate(signal,true)));
+        action('retryDrawing', () => run(signal => illustrate(signal,true)));
         action('styleUpdate', () => saveStyle(true));
         action('styleNew', () => saveStyle(false));
         action('styleRemove', async () => {
@@ -883,12 +1213,20 @@ export function installStudio(host, owner, kind, css) {
         action('removeImage', removeHistory);
         action('zoom', () => { if (previewUrl) host.open(previewUrl,'_blank','noopener'); });
         action('historyZoom', () => { if (historyUrl) host.open(historyUrl,'_blank','noopener'); });
-        dialog.addEventListener('close', () => { ++refreshVersion; clearThumbnails(); paintPreview(null); paintPreview(null,true); });
+        dialog.addEventListener('close', () => { ++refreshVersion; closePassagePicker(); clearThumbnails(); paintPreview(null); paintPreview(null,true); });
         const events = context();
         for (const name of ['CHAT_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_SWIPED','MESSAGE_EDITED','MESSAGE_DELETED']) {
             const event = events.eventTypes?.[name];
             if (!event || !events.eventSource?.on) continue;
-            const handler = () => refresh(name === 'CHAT_CHANGED');
+            const handler = () => {
+                if (name === 'CHAT_CHANGED') {
+                    pickedPassage = null;
+                    closePassagePicker();
+                    if (draftAnchor) setDraft({base:'',negative:'',characters:[]});
+                    if (activePage === 'identity') void refreshIdentities(true);
+                }
+                return refresh(name === 'CHAT_CHANGED');
+            };
             events.eventSource.on(event,handler);
             listeners.push(() => (events.eventSource.off ?? events.eventSource.removeListener)?.call(events.eventSource,event,handler));
         }
@@ -899,7 +1237,12 @@ export function installStudio(host, owner, kind, css) {
         try {
             context();
             if (!dialog) build();
-            if (!dialog.open) { syncDialogViewport(); dialog.showModal(); refresh(); }
+            if (!dialog.open) {
+                syncDialogViewport();
+                dialog.showModal();
+                refresh();
+                if (activePage === 'identity') void refreshIdentities();
+            }
             return {ok:true};
         } catch(error) { return {ok:false,error:error.message}; }
     }

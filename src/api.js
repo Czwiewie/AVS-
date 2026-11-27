@@ -1,3 +1,4 @@
+import {prepareIdentityRoles} from './identity.js';
 import {readPromptCompletion, parsePromptObject, sceneInstruction, normalizeScenePlan} from './planning.js';
 import {isNaiStream, finalNaiFrame} from './nai-stream.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageBody, geminiFinalImage} from './image-providers.js';
@@ -37,9 +38,8 @@ export function drawOptions(values = {}) {
 }
 
 export function compileImagePrompt(protocol, plan, style) {
-    const cues = [...STYLE_FIELDS.map(k => style?.[k]),style?.positive].filter(Boolean);
-    if (protocol === 'nai') return animeTagPlan(plan,cues,style?.negative);
-    return {base:animeProsePrompt(plan,cues,style?.negative),negative:'',characters:[]};
+    if (protocol === 'nai') return animeTagPlan(plan,style);
+    return {base:animeProsePrompt(plan,style),negative:'',characters:[]};
 }
 
 export function knownNaiModel(model) {
@@ -86,13 +86,14 @@ async function request(url, key, body, signal, read, protocol) {
     else signal?.addEventListener('abort', stop, {once: true});
     const timer = setTimeout(() => ctl.abort('timeout'), 300000);
     try {
-        const headers = {'Content-Type': 'application/json'};
+        const form = body instanceof FormData;
+        const headers = form ? {} : {'Content-Type': 'application/json'};
         if (protocol === 'gemini') {
             if (key?.trim()) headers['x-goog-api-key'] = key.trim();
             headers['Api-Revision'] = '2026-05-20';
         } else if (key?.trim()) headers.Authorization = 'Bearer ' + key.trim();
         const r = await fetch(url, {method: 'POST', credentials: 'omit', redirect: 'error', signal: ctl.signal,
-            headers, body: JSON.stringify(body)});
+            headers, body:form ? body : JSON.stringify(body)});
         if (!r.ok) {
             const detail = await r.text().catch(() => '');
             throw serviceError(r.status,detail,key);
@@ -124,7 +125,7 @@ async function jsonChat(config, key, system, content, signal, validate) {
 
 export async function extractStyle(config, key, data, signal) {
     return jsonChat(config, key,
-        'You are an art director. Analyze ONLY transferable artistic techniques, never the depicted subject, likeness, costume, pose, objects, signage or setting. Return JSON with exactly five string fields: line, color, light, rendering, composition. Each is a concise English phrase of 2 to 9 words describing technique (for composition describe treatment of space, never a fixed shot or placement). No artist names, no boilerplate.',
+        'You are an art director. Analyze ONLY transferable artistic techniques. Return JSON with exactly five concise English fields: line, color, light, rendering, composition. Only color and light are used as optional local accents under the fixed contemporary Azur Lane 2D illustration direction. Give the dominant hue in color and the temperature and role of any secondary light in light. Record the other three fields for the user to inspect. Describe techniques only and omit subjects, outfits, objects, specific layouts, artists and instructions.',
         [{type:'text', text:'Describe the visual technique of this reference.'},{type:'image_url', image_url:{url:data}}], signal, style => {
             for (const field of STYLE_FIELDS) if (typeof style?.[field] !== 'string' || !style[field].trim() || style[field].length > 180) {
                 throw Error('画风分析缺少有效字段 ' + field);
@@ -136,11 +137,17 @@ export async function extractStyle(config, key, data, signal) {
 export async function planScene(config, key, source, looks, signal) {
     const protocol = config.imageProtocol || 'nai';
     const compact = protocol === 'nai' && naiFormat(config) === MODELS[0];
-    const visible = source.visualText ?? source.text;
-    return jsonChat(config,key,sceneInstruction(compact,protocol !== 'nai'),
-        JSON.stringify({selectedReply:visible, speaker:source.speaker, optionalAppearance:looks,
-            optionalPriorContext:source.background ?? [], requestedFocus:source.focus ?? ''}), signal,
-        plan => normalizeScenePlan(plan,visible,compact ? 6 : 22));
+    const visible = source.selectedText ?? source.visualText ?? source.text;
+    const natural = protocol !== 'nai';
+    const appearance = looks.filter(({facts,items,identity}) => identity || Object.keys(facts).length || items.length)
+        .map(({id,name,facts,items,identity}) => ({archiveId:id,name,facts,items,
+            fandomIdentity:identity && {name:identity.romanName || identity.name,work:identity.work,aliases:identity.aliases,
+                features:identity.features}}));
+    return jsonChat(config,key,sceneInstruction(compact,natural),
+        JSON.stringify({selectedReply:visible, speaker:source.speaker, optionalAppearance:appearance,
+            optionalPriorContext:source.background ?? [], earlierInSameReply:source.earlierInReply ?? '',
+            archiveTiming:source.passage ? 'before this reply' : 'selected reply', requestedFocus:source.focus ?? ''}), signal,
+        plan => prepareIdentityRoles(normalizeScenePlan(plan,visible,compact ? 6 : 22),looks,source,natural));
 }
 
 export function naiBody(model, plan, style, options = {}) {
@@ -170,6 +177,39 @@ export function makeImageBody(connection, plan, style, options) {
     if (Object.hasOwn(NATIVE_IMAGE_PROVIDERS,protocol)) return nativeImageBody(protocol,connection,prompt);
     return {model, prompt, n:1, size:connection.otherSize || 'auto',
         ...(connection.otherReply === 'b64_json' && !isGptImageModel(model) ? {response_format:'b64_json'} : {})};
+}
+
+export function supportsIdentityImages(connection) {
+    const {imageProtocol, imageModel} = connection;
+    return imageProtocol === 'grok' || imageProtocol === 'gemini' ||
+        imageProtocol === 'openai' && isGptImageModel(imageModel);
+}
+
+export function makeImageRequest(connection, plan, style, options, references = []) {
+    const body = makeImageBody(connection,plan,style,options);
+    const protocol = connection.imageProtocol || 'nai';
+    let path = IMAGE_PATHS[protocol];
+    let prompt = body.prompt ?? body.input;
+    if (!references.length || !supportsIdentityImages(connection)) return {body,path,prompt,model:body.model};
+    prompt += '\n\nCharacter reference images: ' + references.map((ref,index) =>
+        'image ' + (index+1) + ' depicts subject ' + ref.subject).join('; ') +
+        '. Use these images for recognizable physical identity. Follow the scene for current outfit, actions, composition and setting. Keep the opening art direction for the entire image.';
+    if (protocol === 'gemini') {
+        const input = [{type:'text', text:prompt}, ...references.map(({image}) => ({
+            type:'image',mime_type:image.type,data:image.data
+        }))];
+        return {path,prompt,model:body.model,body:{...body,input}};
+    }
+    path = '/images/edits';
+    if (protocol === 'grok') {
+        const inputs = references.map(({image}) => ({type:'image_url',url:'data:' + image.type + ';base64,' + image.data}));
+        return {path,prompt,model:body.model,body:{...body,prompt,
+            ...(inputs.length === 1 ? {image:inputs[0]} : {images:inputs})}};
+    }
+    const form = new FormData();
+    for (const [field,value] of Object.entries({...body,prompt})) form.set(field,String(value));
+    for (const {image} of references) form.append('image[]',image.blob,'reference.jpg');
+    return {path,prompt,model:body.model,body:form};
 }
 
 const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
@@ -205,9 +245,14 @@ async function imageResponseBytes(response, limit, signal, interrupted) {
     return bytes;
 }
 
-export function generate(config, key, body, signal, onReceiving) {
+export function generate(config, key, requestData, signal, onReceiving) {
     const protocol = config.imageProtocol || 'nai';
-    return request(endpoint(config.imageBase || config.naiBase, IMAGE_PATHS[protocol]), key, body, signal, async (r, requestSignal) => {
+    const {body,path,model} = requestData?.path ? requestData :
+        {body:requestData,path:IMAGE_PATHS[protocol],model:requestData.model};
+    const base = config.imageBase || config.naiBase;
+    const previousPath = IMAGE_PATHS[protocol];
+    const address = path === previousPath ? base : base.trim().replace(/\/images\/generations\/?$/, '');
+    return request(endpoint(address,path), key, body, signal, async (r, requestSignal) => {
         onReceiving();
         const bytes = await imageResponseBytes(r,MAX_RESPONSE_BYTES,requestSignal,
             '已收到生图接口响应，但读取响应体时连接中断。请检查服务商连接或响应状态。');
@@ -234,7 +279,7 @@ export function generate(config, key, body, signal, onReceiving) {
                 }
                 let directImage = '';
                 if (protocol === 'openai') {
-                    if (isGptImageModel(body.model)) directImage = '请服务商直接返回图片数据，或提供可跨域直读的链接。';
+                    if (isGptImageModel(model)) directImage = '请服务商直接返回图片数据，或提供可跨域直读的链接。';
                     else if (body.response_format === 'b64_json') directImage = '当前请求了 Base64，但服务商仍返回链接。请核对服务商支持的回图格式。';
                     else directImage = '可在「连接」尝试选择 Base64 回图，或请服务商提供可跨域直读的图片链接。';
                 }

@@ -64,7 +64,7 @@
 #avs-illustration-studio h3 { font-size: 1rem; }
 #avs-illustration-studio h4 { font-size: .96rem; }
 #avs-illustration-studio .studio-nav {
-    display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); padding: 6px 12px; gap: 5px;
+    display: grid; grid-template-columns: repeat(2,minmax(0,1fr)) minmax(0,1.7fr) repeat(3,minmax(0,1fr)); padding: 6px 12px; gap: 5px;
     background: #fff; border-bottom: 1px solid var(--academy-edge);
 }
 #avs-illustration-studio .studio-nav button[data-tab] { background: transparent; border-color: transparent; padding-inline: 2px; white-space: nowrap; font-size: .88rem; }
@@ -603,4 +603,29 @@ dialog.avs-q-modal :is(.q-actions,.t-actions) {
 .avs-academy-picker .avs-picker-rows [aria-pressed=true] {
     --academy-button-fill: var(--academy-selected);
     --academy-button-edge: var(--academy-highlight);
+}
+
+#avs-illustration-studio .studio-identity-image {
+    display: block;
+    max-width: 100%;
+    max-height: 240px;
+    width: auto;
+    object-fit: contain;
+    justify-self: center;
+}
+
+#avs-illustration-studio .studio-passage-list {
+    max-height: min(44dvh, 25rem);
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+#avs-illustration-studio .studio-passage-list button {
+    text-align: start;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-height: 44px;
+}
+#avs-illustration-studio .studio-passage-list button[aria-pressed="true"] {
+    border-color: var(--academy-highlight);
+    background: var(--academy-selected);
 }

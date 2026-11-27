@@ -1,3 +1,5 @@
+import {matchingCharacters} from './identity.js';
+
 function legacyFloorText(message) {
     if (!message || message.is_user || message.is_system || message.extra?.isSmallSys) return '';
     return String(message.mes ?? '').replace(/<(think|thinking|reasoning)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
@@ -11,10 +13,13 @@ function legacyFloorText(message) {
 export function prose(message) {
     return legacyFloorText(message)
         .replace(/<!--[\s\S]*?(?:-->|$)/g,'')
+        .replace(/^[ \t]*(`{3,}|~{3,})[^\r\n]*\r?\n[\s\S]*?(?:^[ \t]*\1[ \t]*(?=\r?$)|(?![\s\S]))/gm,'')
         .replace(/<(script|style|template)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi,'')
-        .replace(/<(wave_plan|planning|plan|analysis|summary|choices|options|status_bar)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'')
-        .replace(/<(?:wave_plan|planning|plan|analysis|summary|choices|options|status_bar)\b[^>]*>[\s\S]*$/gi,'')
+        .replace(/<(wave_plan|planning|plan|analysis|summary|choices|options|status_bar|UpdateVariable)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,'')
+        .replace(/<(?:wave_plan|planning|plan|analysis|summary|choices|options|status_bar|UpdateVariable)\b[^>]*>[\s\S]*$/gi,'')
         .replace(/<(?:now_plot|gametxt|story|narrative)\b[^>]*>|<\/(?:now_plot|gametxt|story|narrative)\s*>/gi,'')
+        .replace(/<\/(?:p|div)\s*>|<br\s*\/?>/gi,'\n')
+        .replace(/<\/?(?:p|div|em|strong|span|i|b)\b[^>]*>/gi,'')
         .trim();
 }
 
@@ -31,38 +36,103 @@ export function sourceAt(ctx, selected = 'latest') {
     return {key, index, text, visualText, speaker: m.name || '', latest: index === chat.findLastIndex(m => prose(m))};
 }
 
-function appearance(groups) {
-    const parts = [];
-    for (const group of ['beauty', 'body', 'clothing', 'accessories', 'overview']) {
-        for (const [field, rec] of Object.entries(groups?.[group] ?? {})) {
-            if (typeof rec?.fact === 'string' && rec.fact.trim()) {
-                parts.push([field, rec.fact.slice(0, 240)]);
-            }
-        }
+export function passageRanges(text) {
+    const sentences = new Intl.Segmenter('zh',{granularity:'sentence'});
+    const ranges = [];
+    const add = (part, offset) => {
+        const value = part.trim();
+        if (!value || !/[\p{L}\p{N}]/u.test(value)) return;
+        const start = offset + part.indexOf(value);
+        ranges.push({start,end:start + value.length,text:value});
+    };
+    for (const line of text.matchAll(/[^\r\n]+/g)) {
+        if (line[0].length <= 260) add(line[0],line.index);
+        else for (const sentence of sentences.segment(line[0])) add(sentence.segment,line.index + sentence.index);
     }
-    return parts;
+    return ranges;
 }
 
-export async function optionalLooks(bridge, source, timeout = 1200) {
-    if (!bridge?.fullInspector) return [];
+export function withPassage(source, passage) {
+    const {start,end} = passage;
+    if (!Number.isInteger(start) || !Number.isInteger(end) ||
+        start < 0 || end <= start || end > source.visualText?.length) throw Error('正文范围已失效，请重新选择。');
+    const text = source.visualText.slice(start,end);
+    if (text !== passage.text) throw Error('这段正文已变更，请重新选择。');
+    return {...source,passage:{start,end,text},selectedText:text,
+        earlierInReply:source.visualText.slice(0,start).trim().slice(-1800)};
+}
+
+const visualGroups = {
+    overview:['种族','肤色与肌肤质感','风格与气质'],
+    beauty:null, body:['身高与头身比','整体身形体态'], clothing:null, accessories:null, scene:null
+};
+const useful = (value, limit) => typeof value === 'string' ? value.trim().slice(0,limit) : '';
+
+function appearance(view) {
+    const {groups} = view?.visual59 ?? view?.v59 ?? view?.v58 ?? {};
+    const assets = Array.isArray(view?.ng_items) ? view.ng_items : [];
+    const itemSlots = new Set(assets.map(item => item.slot));
+    const facts = {};
+    for (const [group, fields] of Object.entries(visualGroups)) {
+        for (const [field, rec] of Object.entries(groups?.[group] ?? {})) {
+            if (fields && !fields.includes(field) || itemSlots.has(field)) continue;
+            const fact = useful(rec?.fact, 240);
+            if (fact) (facts[group] ??= {})[field] = fact;
+        }
+    }
+    const items = assets.filter(item => item.name).sort((a,b) =>
+        Number(b.wear_state === 'worn') - Number(a.wear_state === 'worn')).slice(0,32).map(item => ({
+        slot:item.slot, name:item.name, wearState:item.wear_state || 'unknown',
+        condition:item.condition, location:useful(item.location?.label,100),
+        design:item.wear_state === 'worn' ? useful(item.design?.fact,230) || useful(item.design?.prose,180) : undefined
+    }));
+    return {facts, items};
+}
+
+export function archivePeople(summary) {
+    return (summary?.characters ?? []).filter(person => !person.blocked && person.character_id && person.name)
+        .map(person => ({id:person.character_id, name:person.name, active:person.active}));
+}
+
+export async function optionalLooks(bridge, source, bindings = {}, useArchive = true, timeout = 1800) {
+    if (!bridge?.fullInspector || !useArchive && !Object.keys(bindings).length) return [];
     let timer;
     const read = async () => {
         const summary = await bridge.fullInspector();
-        const people = (summary.characters ?? []).filter(p => !p.blocked && p.name &&
-            ((source.visualText ?? source.text).includes(p.name) || source.speaker === p.name));
-        if (!people.length || summary.runtime?.rebuild_required || summary.runtime?.requires_sync) return [];
-        const floor = summary.runtime?.last_processed_message_id;
-        const current = source.latest && floor != null && Number(floor) === source.index;
-        const history = current ? null : (await bridge.historyIndex?.())?.find(h => h.message_id === source.index);
-        if (!current && !history) return [];
-        const previous = history ? await bridge.historyDetail(history.node_key) : null;
-        const results = await Promise.all(people.map(async p => {
-            const view = current ? (await bridge.fullInspector(p.character_id)).selected :
-                previous?.characters?.find(c => c.id === p.character_id);
-            const facts = appearance((view?.visual59 ?? view?.v59 ?? view?.v58 ?? view?.visual58)?.groups);
-            return facts.length ? {name: p.name, facts} : null;
+        const runtime = summary?.runtime;
+        const visible = source.selectedText ?? source.visualText ?? source.text;
+        const active = archivePeople(summary);
+        const blocked = new Set((summary?.characters ?? []).filter(person => person.blocked).map(person => person.character_id));
+        const nodes = useArchive ? (await bridge.historyIndex?.()) ?? [] : [];
+        // A reply's end state may contain changes that occur after the selected moment.
+        const history = source.passage
+            ? nodes.reduce((previous,node) => Number(node.message_id) < source.index &&
+                (!previous || Number(node.message_id) > Number(previous.message_id)) ? node : previous,null)
+            : nodes.find(node => Number(node.message_id) === source.index);
+        const current = !source.passage && history?.current && source.latest && !runtime?.rebuild_required && !runtime?.requires_sync &&
+            Number(runtime?.last_processed_message_id) === source.index &&
+            (!runtime?.active_head || runtime.active_head === history.node_key);
+        const snapshot = history && !current ? await bridge.historyDetail(history.node_key) : null;
+        const historical = new Map((snapshot?.characters ?? []).filter(person => !blocked.has(person.id) &&
+            !person.status?.user_blocked && !person.status?.detached_from_active_timeline).map(person => [person.id,person]));
+        const people = new Map(active.filter(person => !snapshot || historical.has(person.id) || bindings[person.id]?.type === 'fan')
+            .map(person => [person.id,person]));
+        for (const [id, person] of historical) people.set(id,{id,name:person.name});
+        const named = [...people.values()].map(person => ({...person, identity:bindings[person.id]}));
+        // Candidate discovery keeps overlapping names so the final role check can detect ambiguity.
+        const relevant = named.filter(person => matchingCharacters([person],visible,source.speaker).length ||
+            (source.earlierInReply && matchingCharacters([person],source.earlierInReply).length))
+            .sort((a,b) => Number(b.identity?.type === 'fan') - Number(a.identity?.type === 'fan'));
+        const results = await Promise.all(relevant.slice(0,12).map(async ({id,name,identity}) => {
+            const fan = identity?.type === 'fan' ? identity : undefined;
+            const live = current ? await bridge.fullInspector(id) : null;
+            const matchesFloor = live?.selected?.character_id === id &&
+                Number(live.runtime?.last_processed_message_id) === source.index &&
+                live.runtime?.active_head === runtime.active_head && !live.runtime?.requires_sync;
+            const view = matchesFloor ? live.selected : historical.get(id);
+            return {id,name,identity:fan,...appearance(view)};
         }));
-        return results.filter(Boolean);
+        return results;
     };
     try {
         return await Promise.race([read(), new Promise(resolve => { timer = setTimeout(() => resolve([]), timeout); })]);

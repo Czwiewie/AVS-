@@ -2,7 +2,7 @@ import {MODEL_NAMES} from './api.js';
 import {NATIVE_IMAGE_PROVIDERS, nativeImageOptions} from './image-providers.js';
 
 export const STUDIO_PAGES = {
-    draw:'绘图', prompts:'提示词', styles:'画风', gallery:'历史', settings:'连接'
+    draw:'绘图', prompts:'提示词', identity:'角色参考', styles:'画风', gallery:'历史', settings:'连接'
 };
 
 export const CANVASES = {'832x1216':'竖幅', '1216x832':'横幅', '1024x1024':'方形',
@@ -45,19 +45,42 @@ export function workshopPanel(samplers) {
           <div class="studio-model-buttons">${modelButtons}</div>
           <input type="hidden" data-field="naiModel">
         </fieldset>
-        <p class="studio-note">出图画风 · 碧蓝航线式二维立绘</p>
-        <h3>画面来源</h3>
-        <div class="studio-grid">
-          <label>绘图方式<select data-field="mode" data-lock><option value="scene">AI 楼层配图</option><option value="manual">手写提示词</option></select></label>
-          <label data-field="floorGroup">目标楼层<select data-field="floor" data-lock></select></label>
-        </div>
+        <p class="studio-note">最高画风标准 · 碧蓝航线式二维立绘</p>
         <p class="studio-note" data-field="excerpt"></p>
-        <label data-field="focusGroup">画面重点（可选）<input data-field="focus" maxlength="400" placeholder="例如只画雨后从桥上离开的背影" data-lock></label>
-        <div class="studio-row studio-chips">
-          <button type="button" data-jump="styles" data-field="styleLink">画风</button>
-          <button type="button" data-jump="prompts">编辑提示词</button>
+        <div class="studio-row" data-field="passageActions">
+          <button type="button" data-field="pickPassage" data-lock aria-expanded="false">指定正文片段</button>
+          <button type="button" data-field="clearPassage" data-lock hidden>恢复自动选画面</button>
         </div>
-        <details class="studio-card" open>
+        <div class="studio-stack" data-field="passagePicker" hidden>
+          <p class="studio-note" data-field="passageHelp" role="status"></p>
+          <div class="studio-stack studio-passage-list" data-field="passageRows"></div>
+        </div>
+        <figure data-field="result" hidden>
+          <figcaption data-field="caption"></figcaption>
+          <button class="studio-image-button" type="button" data-field="zoom" aria-label="查看原图"><img data-field="image" alt="本次生成的插画"></button>
+          <div class="studio-row">
+            <button type="button" data-field="redrawPreview" data-lock hidden>重画这张</button>
+            <a data-field="download">下载原图</a><button type="button" data-jump="gallery">查看历史</button>
+          </div>
+          <div class="studio-row" data-field="previewVersions" hidden>
+            <button type="button" data-field="olderPreview">上一版</button>
+            <output data-field="versionLabel" aria-label="当前版本"></output>
+            <button type="button" data-field="newerPreview">下一版</button>
+          </div>
+        </figure>
+        <details class="studio-card">
+          <summary>更换楼层、画面重点与手写模式</summary>
+          <div class="studio-grid">
+            <label>绘图方式<select data-field="mode" data-lock><option value="scene">AI 楼层配图</option><option value="manual">手写提示词</option></select></label>
+            <label data-field="floorGroup">目标楼层<select data-field="floor" data-lock></select></label>
+          </div>
+          <label data-field="focusGroup">画面重点（可选）<input data-field="focus" maxlength="400" placeholder="例如只画雨后从桥上离开的背影" data-lock></label>
+          <div class="studio-row studio-chips">
+            <button type="button" data-jump="styles" data-field="styleLink">画风</button>
+            <button type="button" data-jump="prompts">编辑提示词</button>
+          </div>
+        </details>
+        <details class="studio-card">
           <summary>画布与张数</summary>
           <div class="studio-grid">
             <label data-field="canvasRow">画幅<select data-field="canvas" data-lock>${sizes}<option value="custom">自定义</option></select></label>
@@ -91,38 +114,75 @@ export function workshopPanel(samplers) {
             <button type="button" data-field="resetDraw" data-lock>恢复绘图默认值</button>
           </div>
         </details>
-        <figure data-field="result" hidden>
-          <figcaption data-field="caption"></figcaption>
-          <button class="studio-image-button" type="button" data-field="zoom" aria-label="查看原图"><img data-field="image" alt="本次生成的插画"></button>
-          <div class="studio-row"><a data-field="download">下载原图</a><button type="button" data-jump="gallery">查看历史</button></div>
-        </figure>
+
       </section>
 
       <section data-page="prompts" hidden>
         <h3>提示词编辑</h3>
         <p class="studio-note" data-field="draftSource"></p>
+        <p class="studio-note" data-field="draftIdentities" hidden></p>
         <div class="studio-row">
           <button type="button" data-field="plan" data-lock>从楼层提取草稿</button>
           <button type="button" data-field="copyPrompt">复制当前提示词</button>
         </div>
         <label>正面提示词<textarea data-field="positive" rows="4" data-lock placeholder="场景、人数、动作、镜头和光影"></textarea></label>
         <label>负面提示词<textarea data-field="negative" rows="2" data-lock></textarea></label>
-        <label class="studio-check"><input type="checkbox" data-field="applyStyle" data-lock>叠加已选参考画风</label>
+        <label class="studio-check"><input type="checkbox" data-field="applyStyle" data-lock>使用参考图的局部色彩和辅光</label>
         <div class="studio-row"><h3>独立人物提示词</h3><button type="button" data-field="addRole" data-lock>添加人物</button></div>
         <div class="studio-stack" data-field="roles"></div>
         <button class="studio-secondary" type="button" data-field="drawDraft" data-lock>按这份提示词生成</button>
       </section>
 
+      <section data-page="identity" hidden>
+        <label>档案角色<select data-field="identityPerson" data-lock></select></label>
+        <p class="studio-note" data-field="identityStatus" role="status"></p>
+        <div class="studio-stack" data-field="identityForm" hidden>
+          <label>角色类型<select data-field="identityType" data-lock>
+            <option value="">请选择角色类型</option>
+            <option value="fan">已确认同人角色</option>
+            <option value="original">非同人角色</option>
+          </select></label>
+          <div class="studio-card studio-stack" data-field="fanFields" hidden>
+            <div class="studio-row">
+              <button type="button" data-field="identitySuggestion" data-lock hidden></button>
+              <a data-field="identitySearch" target="_blank" rel="noopener noreferrer">在萌娘百科查找</a>
+            </div>
+            <div class="studio-grid">
+              <label>原作角色名<input data-field="identityName" maxlength="80" data-lock></label>
+              <label>原作作品名<input data-field="identityWork" maxlength="100" data-lock></label>
+            </div>
+            <label>原名或英文名（可选）<input data-field="identityRoman" maxlength="80" data-lock></label>
+            <label>剧情中的其他称呼（可选）<input data-field="identityAliases" maxlength="200" placeholder="用逗号分隔" data-lock></label>
+            <label>原作外貌特征<textarea data-field="identityFeatures" rows="3" maxlength="600" data-lock placeholder="发色、瞳色、脸部标记等容易辨认的特征"></textarea></label>
+            <label>NovelAI 人物标签（可选）<textarea data-field="identityTags" rows="2" maxlength="400" data-lock></textarea></label>
+            <label>资料来源（可选）<input type="url" data-field="identitySource" maxlength="500" data-lock></label>
+            <a data-field="identitySourceLink" target="_blank" rel="noopener noreferrer" hidden>打开原作资料</a>
+          </div>
+          <button type="button" data-field="identitySave" data-lock>保存角色类型与原作资料</button>
+          <div class="studio-card studio-stack" data-field="identityImageBox" hidden>
+            <p class="studio-note">生图参考图用于人物身份。支持图片输入的线路会在自动草稿中附带它，可在人物分栏取消。</p>
+            <img class="studio-identity-image" data-field="identityImage" alt="原作人物参考图" hidden>
+            <div class="studio-row">
+              <button type="button" data-field="identityOfficialImage" data-lock hidden>保存官方人物图</button>
+              <a data-field="identityPortraitLink" target="_blank" rel="noopener noreferrer" hidden>打开官方人物图</a>
+            </div>
+            <label class="studio-file">上传人物参考图<input data-field="identityUpload" type="file" accept="image/png,image/jpeg,image/webp" data-lock></label>
+            <button type="button" data-field="identityRemoveImage" data-lock hidden>移除人物参考图</button>
+          </div>
+        </div>
+      </section>
+
       <section data-page="styles" hidden>
         <h3>画风库</h3>
-        <label>当前画风<select data-field="styles" data-lock></select></label>
+        <p class="studio-note">碧蓝航线立绘为最高标准。参考图仅补充相容的局部色彩和辅光。</p>
+        <label>当前参考<select data-field="styles" data-lock></select></label>
         <label class="studio-file">上传参考图并提取画风<input data-field="upload" type="file" accept="image/png,image/jpeg,image/webp" data-lock></label>
         <details class="studio-card" open>
           <summary>编辑或新建画风</summary>
           <label>预设名称<input data-field="styleName" maxlength="70" data-lock></label>
           <div class="studio-grid" data-field="styleFields"></div>
-          <label>附加正面词／画师串<textarea data-field="stylePositive" rows="3" data-lock></textarea></label>
-          <label>画风负面词<textarea data-field="styleNegative" rows="2" data-lock></textarea></label>
+          <label>参考正面词（仅保存）<textarea data-field="stylePositive" rows="3" data-lock></textarea></label>
+          <label>参考负面词（仅保存）<textarea data-field="styleNegative" rows="2" data-lock></textarea></label>
           <div class="studio-row">
             <button type="button" data-field="styleUpdate" data-lock>更新所选画风</button>
             <button type="button" data-field="styleNew" data-lock>另存为新画风</button>
@@ -145,6 +205,7 @@ export function workshopPanel(samplers) {
           </details>
           <div class="studio-row">
             <a data-field="historyDownload">下载原图</a>
+            <button type="button" data-field="redrawHistory" data-lock hidden>重画这张</button>
             <button type="button" data-field="reuse" data-lock>载入提示词与参数</button>
             <button type="button" data-field="removeImage" data-lock>删除记录</button>
           </div>
@@ -233,7 +294,8 @@ export function workshopPanel(samplers) {
       </div>
       <p data-field="status" role="status" aria-live="polite"></p>
       <div class="studio-row">
-        <button type="button" class="studio-primary studio-grow" data-field="make" data-lock>生成插画</button>
+        <button type="button" class="studio-primary studio-grow" data-field="make" data-lock>一键画当前回复</button>
+        <button type="button" data-field="retryDrawing" data-lock hidden>用现有草稿重试</button>
         <button type="button" data-field="cancel" hidden>取消任务</button>
       </div>
     </footer>`;

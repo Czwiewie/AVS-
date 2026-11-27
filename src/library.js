@@ -2,11 +2,14 @@ export function pictureLibrary(host, name) {
     let database;
     function openDatabase() {
         database ??= new Promise((resolve, reject) => {
-            const request = host.indexedDB.open(name, 2);
+            const request = host.indexedDB.open(name, 3);
             request.onupgradeneeded = () => {
                 const db = request.result;
                 if (!db.objectStoreNames.contains('images')) db.createObjectStore('images');
-                db.createObjectStore('gallery', {keyPath:'id'}).createIndex('bySource', ['source', 'date', 'id']);
+                if (!db.objectStoreNames.contains('gallery')) {
+                    db.createObjectStore('gallery', {keyPath:'id'}).createIndex('bySource', ['source', 'date', 'id']);
+                }
+                db.createObjectStore('identityImages');
             };
             request.onsuccess = () => {
                 const db = request.result;
@@ -53,6 +56,18 @@ export function pictureLibrary(host, name) {
         },
         drop(id) {
             return operation('gallery', 'readwrite', store => store.delete(id));
+        },
+        getIdentityImage(key) {
+            return operation('identityImages','readonly',(store, result) => {
+                const request = store.get(key);
+                request.onsuccess = () => result(request.result);
+            });
+        },
+        putIdentityImage(key, image) {
+            return operation('identityImages','readwrite',store => store.put(image,key));
+        },
+        dropIdentityImage(key) {
+            return operation('identityImages','readwrite',store => store.delete(key));
         },
         close() { database?.then(db => db.close()).catch(() => {}); }
     };
