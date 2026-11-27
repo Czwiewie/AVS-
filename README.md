@@ -1,4 +1,4 @@
-# AVS 视觉工坊 1.2.6
+# AVS 视觉工坊 1.2.7
 
 面向 SillyTavern 1.19.0 的聊天插画扩展，支持 NovelAI Diffusion 4.5 Full、5 Full、OpenAI 兼容生图、原生 xAI Grok Imagine 与 Google Gemini Nano Banana。
 
@@ -24,6 +24,12 @@
 | Google 原生 · Gemini Nano Banana | `https://generativelanguage.googleapis.com/v1beta` | Nano Banana 2.1、2、2 Lite、Pro、初代 Nano Banana |
 
 xAI 用 Images API 的画幅比例和分辨率；2.0 可单独调画质。Google 用 Interactions API，明确请求图像并读取最终输出，按型号提供画幅和分辨率。这两条线路独立保存配置，服务商仍需允许当前浏览器跨域访问。OpenAI 兼容中转仍用「OpenAI 兼容图片生成」。[xAI 官方生图文档](https://docs.x.ai/developers/model-capabilities/images/generation) · [Gemini 官方生图文档](https://aistudio.google.com/docs/image-generation)
+
+## 第三方生图接口与回图
+
+在「连接 → 其它生图 API → OpenAI 兼容图片生成」填写服务商提供的基础地址、密钥和生图模型名。第三方需要开放 `POST /v1/images/generations`，并允许酒馆页面跨域调用。模型列表可获取只说明列表接口可用。
+
+「回图格式」默认沿用服务商设置。若错误指出生图接口已返回链接但浏览器无法下载图片，可在服务商支持 `response_format: "b64_json"` 时选择「Base64」并保存，再用保留的草稿出图。参数由第三方实现。对于拒绝该参数的模型，使用「服务商默认」。链接方式要求图片地址允许当前酒馆网页直接读取。若服务商既不提供内联图片，也不开放链接读取权限，酒馆网页直连无法取得图像数据。工坊按接口响应、响应体或图片链接三个阶段显示失败原因，且不会自动重新发送请求。
 
 ## 二维立绘画风
 
